@@ -40,16 +40,36 @@
         "three": "./node_modules/three/build/three.module.js",
         "three/examples/jsm/controls/OrbitControls.js": "./node_modules/three/examples/jsm/controls/OrbitControls.js",
         "three/examples/jsm/utils/BufferGeometryUtils.js": "./node_modules/three/examples/jsm/utils/BufferGeometryUtils.js",
-        "three-bvh-csg": "./node_modules/three-bvh-csg/build/index.module.js"
+        "three-bvh-csg": "./node_modules/three-bvh-csg/build/index.module.js",
+        "three-mesh-bvh": "./node_modules/three-mesh-bvh/build/index.module.js"
       }
     }
   </script>
 </head>
 <body>
   <div id="ui">
-    <label for="distance">Sweep distance</label>
-    <input id="distance" type="range" min="0" max="3" step="0.05" value="1.5" />
-    <span id="value">1.50</span>
+    <label for="coneY">Cone Y position</label>
+    <input id="coneY" type="range" min="0" max="2.5" step="0.05" value="1.0" />
+    <span id="coneYVal">1.00</span>
+    <br />
+    <label for="sweep">Sweep distance (+Y)</label>
+    <input id="sweep" type="range" min="0.5" max="6" step="0.05" value="5" />
+    <span id="sweepVal">5.00</span>
+    <br />
+    <label>
+      <input id="showSweep" type="checkbox" checked />
+      Show cutting volume
+    </label>
+    <br />
+    <label>
+      <input id="showBase" type="checkbox" checked />
+      Show base volume
+    </label>
+    <br />
+    <label>
+      <input id="showCutterOnly" type="checkbox" />
+      Show cutter only
+    </label>
   </div>
   <script type="module" src="./main.js"></script>
 </body>
