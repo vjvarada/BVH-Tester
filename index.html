@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Three.js BVH CSG Sweep Demo</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+      background: #e9ecf1;
+    }
+    #ui {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      padding: 10px 12px;
+      background: rgba(255, 255, 255, 0.9);
+      border-radius: 6px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+      z-index: 10;
+    }
+    #ui label {
+      display: block;
+      font-weight: bold;
+      margin-bottom: 6px;
+    }
+    #ui input[type="range"] {
+      width: 220px;
+    }
+    #value {
+      font-weight: bold;
+      margin-left: 8px;
+    }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./node_modules/three/build/three.module.js",
+        "three/examples/jsm/controls/OrbitControls.js": "./node_modules/three/examples/jsm/controls/OrbitControls.js",
+        "three/examples/jsm/utils/BufferGeometryUtils.js": "./node_modules/three/examples/jsm/utils/BufferGeometryUtils.js",
+        "three-bvh-csg": "./node_modules/three-bvh-csg/build/index.module.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="ui">
+    <label for="distance">Sweep distance</label>
+    <input id="distance" type="range" min="0" max="3" step="0.05" value="1.5" />
+    <span id="value">1.50</span>
+  </div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
