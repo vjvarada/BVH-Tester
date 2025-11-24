@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Three.js Projected Offset Generator - BVH Accelerated</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+            background: #1a1a1a;
+            color: #fff;
+        }
+
+        #canvas-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        #ui-panel {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: rgba(30, 30, 30, 0.95);
+            padding: 20px;
+            border-radius: 10px;
+            z-index: 100;
+            max-width: 350px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+        }
+
+        h1 {
+            font-size: 18px;
+            margin-bottom: 15px;
+            color: #4fc3f7;
+        }
+
+        .section {
+            margin-bottom: 20px;
+        }
+
+        .section-title {
+            font-size: 14px;
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #81c784;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 13px;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .file-upload-btn {
+            display: block;
+            width: 100%;
+            padding: 10px;
+            background: #4fc3f7;
+            color: #fff;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s;
+        }
+
+        .file-upload-btn:hover {
+            background: #0288d1;
+        }
+
+        input[type="number"] {
+            width: 100%;
+            padding: 8px;
+            background: #2a2a2a;
+            border: 1px solid #444;
+            border-radius: 5px;
+            color: #fff;
+            font-size: 13px;
+        }
+
+        button {
+            width: 100%;
+            padding: 10px;
+            margin-top: 10px;
+            background: #81c784;
+            color: #fff;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s;
+        }
+
+        button:hover {
+            background: #4caf50;
+        }
+
+        button:disabled {
+            background: #555;
+            cursor: not-allowed;
+        }
+
+        .checkbox-group {
+            margin-top: 10px;
+        }
+
+        .checkbox-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .checkbox-item input {
+            margin-right: 8px;
+            width: auto;
+        }
+
+        #status {
+            margin-top: 15px;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 5px;
+            font-size: 12px;
+            color: #4fc3f7;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+        }
+
+        .log-success {
+            color: #81c784;
+        }
+
+        .log-error {
+            color: #e57373;
+        }
+
+        .log-info {
+            color: #4fc3f7;
+        }
+
+        #stats-container {
+            position: fixed;
+            top: 0;
+            right: 0;
+            z-index: 100;
+        }
+    </style>
+</head>
+<body>
+    <!-- UI Panel -->
+    <div id="ui-panel">
+        <h1>🎯 Projected Offset Generator</h1>
+        
+        <!-- File Upload Section -->
+        <div class="section">
+            <div class="section-title">1. Load STL File</div>
+            <input type="file" id="file-input" accept=".stl" />
+            <label for="file-input" class="file-upload-btn">📁 Upload STL</label>
+        </div>
+
+        <!-- Offset Configuration -->
+        <div class="section">
+            <div class="section-title">2. Configure Offset</div>
+            <label for="offset-distance">Offset Distance:</label>
+            <input type="number" id="offset-distance" value="5" step="0.1" min="0" />
+            
+            <label for="heightmap-resolution" style="margin-top: 10px;">Heightmap Resolution:</label>
+            <input type="number" id="heightmap-resolution" value="256" step="64" min="64" max="1024" />
+        </div>
+
+        <!-- Generate Button -->
+        <div class="section">
+            <button id="generate-btn" disabled>⚡ Generate Projected Offset</button>
+        </div>
+
+        <!-- View Controls -->
+        <div class="section">
+            <div class="section-title">3. View Options</div>
+            <div class="checkbox-group">
+                <div class="checkbox-item">
+                    <input type="checkbox" id="show-original" checked />
+                    <label for="show-original">Show Original Mesh</label>
+                </div>
+                <div class="checkbox-item">
+                    <input type="checkbox" id="show-offset" checked />
+                    <label for="show-offset">Show Offset Mesh</label>
+                </div>
+                <div class="checkbox-item">
+                    <input type="checkbox" id="show-heightmap" />
+                    <label for="show-heightmap">Show Heightmap Mesh</label>
+                </div>
+                <div class="checkbox-item">
+                    <input type="checkbox" id="show-bbox" />
+                    <label for="show-bbox">Show Bounding Box</label>
+                </div>
+                <div class="checkbox-item">
+                    <input type="checkbox" id="show-axes" checked />
+                    <label for="show-axes">Show Axes Helper</label>
+                </div>
+                <div class="checkbox-item">
+                    <input type="checkbox" id="debug-rays" />
+                    <label for="debug-rays">Debug Rays (Sample)</label>
+                </div>
+            </div>
+        </div>
+
+        <!-- Status Log -->
+        <div id="status">
+            <div class="log-entry log-info">Ready to load STL file...</div>
+        </div>
+    </div>
+
+    <!-- Canvas Container -->
+    <div id="canvas-container"></div>
+
+    <!-- Stats Container -->
+    <div id="stats-container"></div>
+
+    <!-- Three.js and Dependencies -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.168.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.168.0/examples/jsm/",
+            "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.7.8/build/index.module.js"
+        }
+    }
+    </script>
+
+    <script type="module" src="app.js"></script>
+</body>
+</html>
