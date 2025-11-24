@@ -653,20 +653,21 @@ class OffsetGeneratorApp {
         
         const { heightMap, resolution, scale, center } = result;
         
+        // Apply Gaussian smoothing to the heightmap
+        const smoothedHeightMap = this.smoothHeightmap(heightMap, resolution, 2); // 2 passes
+        
         // Create plane geometry from heightmap
         const geometry = new THREE.PlaneGeometry(2, 2, resolution - 1, resolution - 1);
         const positions = geometry.attributes.position.array;
         
-        // Apply heightmap data - note the coordinate mapping
-        // PlaneGeometry vertices go from bottom-left to top-right
-        // We need to flip Y to match the projection
+        // Apply smoothed heightmap data
         for (let i = 0; i < positions.length; i += 3) {
             const vertexIndex = i / 3;
             const x = vertexIndex % resolution;
             const y = Math.floor(vertexIndex / resolution);
             
             // Flip Y coordinate to match rendered heightmap orientation
-            const heightValue = heightMap[(resolution - 1 - y) * resolution + x];
+            const heightValue = smoothedHeightMap[(resolution - 1 - y) * resolution + x];
             positions[i + 2] = heightValue; // Set Z from heightmap
         }
         
@@ -685,7 +686,7 @@ class OffsetGeneratorApp {
             for (let x = 0; x < resolution; x++) {
                 const srcIdx = ((resolution - 1 - y) * resolution + x);
                 const dstIdx = (y * resolution + x) * 4;
-                const value = (heightMap[srcIdx] + 1) * 127.5; // Map [-1,1] to [0,255]
+                const value = (smoothedHeightMap[srcIdx] + 1) * 127.5; // Map [-1,1] to [0,255]
                 imageData.data[dstIdx] = value;
                 imageData.data[dstIdx + 1] = value;
                 imageData.data[dstIdx + 2] = value;
@@ -713,7 +714,52 @@ class OffsetGeneratorApp {
         this.heightmapMesh.visible = document.getElementById('show-heightmap').checked;
         this.scene.add(this.heightmapMesh);
         
-        this.logStatus('✓ Heightmap visualization created', 'success');
+        this.logStatus('✓ Heightmap visualization created (smoothed)', 'success');
+    }
+    
+    smoothHeightmap(heightMap, resolution, passes = 1) {
+        let current = new Float32Array(heightMap);
+        let next = new Float32Array(resolution * resolution);
+        
+        // Gaussian kernel weights (3x3)
+        const kernel = [
+            [1, 2, 1],
+            [2, 4, 2],
+            [1, 2, 1]
+        ];
+        const kernelSum = 16;
+        
+        for (let pass = 0; pass < passes; pass++) {
+            for (let y = 0; y < resolution; y++) {
+                for (let x = 0; x < resolution; x++) {
+                    let sum = 0;
+                    let weightSum = 0;
+                    
+                    // Apply 3x3 kernel
+                    for (let ky = -1; ky <= 1; ky++) {
+                        for (let kx = -1; kx <= 1; kx++) {
+                            const nx = x + kx;
+                            const ny = y + ky;
+                            
+                            // Check bounds
+                            if (nx >= 0 && nx < resolution && ny >= 0 && ny < resolution) {
+                                const idx = ny * resolution + nx;
+                                const weight = kernel[ky + 1][kx + 1];
+                                sum += current[idx] * weight;
+                                weightSum += weight;
+                            }
+                        }
+                    }
+                    
+                    next[y * resolution + x] = sum / weightSum;
+                }
+            }
+            
+            // Swap buffers
+            [current, next] = [next, current];
+        }
+        
+        return current;
     }
     
     clearScene() {
