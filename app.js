@@ -297,7 +297,12 @@ function createOffsetHeightMap(vertices, offset, resolution = 1024) {
     box.getSize(size);
 
     const maxSize = Math.max(size.x, size.y, size.z);
-    const scale = 2 / (maxSize + 2 * offset);
+    
+    // Add padding based on offset to prevent clipping
+    // The offset creates spheres/cylinders that extend outward, so we need extra margin
+    // Use a safety factor (2x) to account for diagonal expansions and corner cases
+    const padding = offset * 2.0;
+    const scale = 2 / (maxSize + 2 * padding);
 
     const center = new THREE.Vector3();
     box.getCenter(center).multiplyScalar(scale);
@@ -396,8 +401,10 @@ class OffsetGeneratorApp {
         this.originalMesh = null;
         this.offsetMesh = null;
         this.heightmapMesh = null;
+        this.heightmapLines = null;
         this.bboxHelper = null;
         this.axesHelper = null;
+        this.axisLabels = [];
         this.rayHelpers = [];
         
         this.loadedGeometry = null;
@@ -448,6 +455,7 @@ class OffsetGeneratorApp {
         // Axes Helper
         this.axesHelper = new THREE.AxesHelper(100);
         this.scene.add(this.axesHelper);
+        this.addAxisLabels(100);
         
         // Stats
         this.stats = new Stats();
@@ -472,6 +480,11 @@ class OffsetGeneratorApp {
         // Generate button
         document.getElementById('generate-btn').addEventListener('click', () => this.generateOffset());
         
+        // Smoothing passes slider
+        document.getElementById('smoothing-passes').addEventListener('input', (e) => {
+            document.getElementById('smoothing-value').textContent = e.target.value;
+        });
+        
         // View toggles
         document.getElementById('show-original').addEventListener('change', (e) => {
             if (this.originalMesh) this.originalMesh.visible = e.target.checked;
@@ -485,12 +498,17 @@ class OffsetGeneratorApp {
             if (this.heightmapMesh) this.heightmapMesh.visible = e.target.checked;
         });
         
+        document.getElementById('show-heightmap-lines').addEventListener('change', (e) => {
+            if (this.heightmapLines) this.heightmapLines.visible = e.target.checked;
+        });
+        
         document.getElementById('show-bbox').addEventListener('change', (e) => {
             if (this.bboxHelper) this.bboxHelper.visible = e.target.checked;
         });
         
         document.getElementById('show-axes').addEventListener('change', (e) => {
             if (this.axesHelper) this.axesHelper.visible = e.target.checked;
+            this.axisLabels.forEach(label => label.visible = e.target.checked);
         });
         
         document.getElementById('debug-rays').addEventListener('change', (e) => {
@@ -590,8 +608,11 @@ class OffsetGeneratorApp {
             // Create offset mesh visualization
             this.createOffsetMeshVisualization(result, offsetDistance);
             
-            // Create heightmap mesh visualization
-            this.createHeightmapVisualization(result);
+            // Create heightmap mesh visualization (this also smooths the data)
+            const smoothedData = this.createHeightmapVisualization(result);
+            
+            // Create heightmap contour lines visualization using the same smoothed data
+            this.createHeightmapLinesVisualization(result, smoothedData);
             
         } catch (error) {
             this.logStatus(`✗ Error generating offset: ${error.message}`, 'error');
@@ -654,24 +675,61 @@ class OffsetGeneratorApp {
         const { heightMap, resolution, scale, center } = result;
         
         // Apply Gaussian smoothing to the heightmap
-        const smoothedHeightMap = this.smoothHeightmap(heightMap, resolution, 2); // 2 passes
+        const smoothingPasses = parseInt(document.getElementById('smoothing-passes').value);
+        const smoothedHeightMap = smoothingPasses > 0 
+            ? this.smoothHeightmap(heightMap, resolution, smoothingPasses)
+            : heightMap; // No smoothing if passes = 0
         
-        // Create plane geometry from heightmap
-        const geometry = new THREE.PlaneGeometry(2, 2, resolution - 1, resolution - 1);
-        const positions = geometry.attributes.position.array;
+        // For high resolutions, we'll downsample for visualization but keep full detail in the data
+        // Adaptive LOD: use fewer vertices for display while keeping the heightmap data at full resolution
+        const targetVertexCount = 250000; // ~500x500 grid, safe for most systems
+        const maxDisplayResolution = Math.floor(Math.sqrt(targetVertexCount));
+        const displayResolution = Math.min(resolution, maxDisplayResolution);
+        const downsampleStep = Math.ceil(resolution / displayResolution);
         
-        // Apply smoothed heightmap data
-        for (let i = 0; i < positions.length; i += 3) {
-            const vertexIndex = i / 3;
-            const x = vertexIndex % resolution;
-            const y = Math.floor(vertexIndex / resolution);
-            
-            // Flip Y coordinate to match rendered heightmap orientation
-            const heightValue = smoothedHeightMap[(resolution - 1 - y) * resolution + x];
-            positions[i + 2] = heightValue; // Set Z from heightmap
+        // Build custom geometry to handle any resolution efficiently
+        const geometry = new THREE.BufferGeometry();
+        const positions = [];
+        const indices = [];
+        const uvs = [];
+        
+        // Create vertices with downsampling if needed
+        for (let y = 0; y < resolution; y += downsampleStep) {
+            for (let x = 0; x < resolution; x += downsampleStep) {
+                // Map to normalized [-1, 1] space
+                const nx = (x / (resolution - 1)) * 2 - 1;
+                // Flip Y coordinate to match the heightmap data orientation
+                const ny = ((resolution - 1 - y) / (resolution - 1)) * 2 - 1;
+                
+                // Get height value with Y-flip
+                const heightValue = smoothedHeightMap[(resolution - 1 - y) * resolution + x];
+                
+                positions.push(nx, ny, heightValue);
+                uvs.push(x / (resolution - 1), 1.0 - (y / (resolution - 1))); // Flip UV Y as well
+            }
         }
         
-        geometry.attributes.position.needsUpdate = true;
+        // Calculate actual grid dimensions after downsampling
+        const gridWidth = Math.ceil(resolution / downsampleStep);
+        const gridHeight = Math.ceil(resolution / downsampleStep);
+        
+        // Create triangle indices for the grid
+        for (let y = 0; y < gridHeight - 1; y++) {
+            for (let x = 0; x < gridWidth - 1; x++) {
+                const a = y * gridWidth + x;
+                const b = y * gridWidth + (x + 1);
+                const c = (y + 1) * gridWidth + x;
+                const d = (y + 1) * gridWidth + (x + 1);
+                
+                // Two triangles per quad
+                indices.push(a, b, d);
+                indices.push(a, d, c);
+            }
+        }
+        
+        geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+        geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uvs), 2));
+        geometry.setIndex(indices);
         geometry.computeVertexNormals();
         
         // Create texture from heightmap for visualization
@@ -714,7 +772,91 @@ class OffsetGeneratorApp {
         this.heightmapMesh.visible = document.getElementById('show-heightmap').checked;
         this.scene.add(this.heightmapMesh);
         
-        this.logStatus('✓ Heightmap visualization created (smoothed)', 'success');
+        const actualVertices = positions.length / 3;
+        if (downsampleStep > 1) {
+            this.logStatus(`✓ Heightmap mesh: ${resolution}x${resolution} data, ${gridWidth}x${gridHeight} display (${actualVertices.toLocaleString()} vertices)`, 'success');
+        } else {
+            this.logStatus(`✓ Heightmap mesh created: ${gridWidth}x${gridHeight} (${actualVertices.toLocaleString()} vertices)`, 'success');
+        }
+        
+        // Return smoothed data for use by contour lines
+        return smoothedHeightMap;
+    }
+    
+    createHeightmapLinesVisualization(result, smoothedHeightMap) {
+        // Remove previous heightmap lines
+        if (this.heightmapLines) {
+            this.scene.remove(this.heightmapLines);
+            this.heightmapLines.geometry.dispose();
+            this.heightmapLines.material.dispose();
+        }
+        
+        const { resolution, scale, center } = result;
+        
+        // Use smoothed data if provided, otherwise use raw data
+        const heightData = smoothedHeightMap || result.heightMap;
+        
+        // Create line segments for the heightmap
+        const positions = [];
+        
+        // Horizontal lines (rows) - sample every N rows for performance
+        const step = Math.max(1, Math.floor(resolution / 64));
+        
+        for (let gridY = 0; gridY < resolution; gridY += step) {
+            for (let gridX = 0; gridX < resolution - 1; gridX++) {
+                // Access heightmap with flipped Y (same as mesh)
+                const idx1 = (resolution - 1 - gridY) * resolution + gridX;
+                const idx2 = (resolution - 1 - gridY) * resolution + (gridX + 1);
+                
+                // Map grid coordinates to normalized [-1, 1] space
+                // Use gridY directly (not flipped) to match PlaneGeometry vertex layout
+                const x1 = (gridX / (resolution - 1)) * 2 - 1;
+                const x2 = ((gridX + 1) / (resolution - 1)) * 2 - 1;
+                const y1 = ((resolution - 1 - gridY) / (resolution - 1)) * 2 - 1;  // Flip Y coordinate
+                const z1 = heightData[idx1];
+                const z2 = heightData[idx2];
+                
+                positions.push(x1, y1, z1);
+                positions.push(x2, y1, z2);
+            }
+        }
+        
+        // Vertical lines (columns) - sample every N columns for performance
+        for (let gridX = 0; gridX < resolution; gridX += step) {
+            for (let gridY = 0; gridY < resolution - 1; gridY++) {
+                // Access heightmap with flipped Y (same as mesh)
+                const idx1 = (resolution - 1 - gridY) * resolution + gridX;
+                const idx2 = (resolution - 1 - (gridY + 1)) * resolution + gridX;
+                
+                const x1 = (gridX / (resolution - 1)) * 2 - 1;
+                const y1 = ((resolution - 1 - gridY) / (resolution - 1)) * 2 - 1;  // Flip Y coordinate
+                const y2 = ((resolution - 1 - (gridY + 1)) / (resolution - 1)) * 2 - 1;  // Flip Y coordinate
+                const z1 = heightData[idx1];
+                const z2 = heightData[idx2];
+                
+                positions.push(x1, y1, z1);
+                positions.push(x1, y2, z2);
+            }
+        }
+        
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+        
+        const material = new THREE.LineBasicMaterial({ 
+            color: 0x00ffff,
+            linewidth: 1
+        });
+        
+        this.heightmapLines = new THREE.LineSegments(geometry, material);
+        
+        // Scale back from normalized space - same as mesh
+        this.heightmapLines.scale.set(1 / scale, 1 / scale, 1 / scale);
+        this.heightmapLines.position.set(center.x / scale, center.y / scale, center.z / scale);
+        
+        this.heightmapLines.visible = document.getElementById('show-heightmap-lines').checked;
+        this.scene.add(this.heightmapLines);
+        
+        this.logStatus('✓ Heightmap contour lines created', 'success');
     }
     
     smoothHeightmap(heightMap, resolution, passes = 1) {
@@ -762,6 +904,47 @@ class OffsetGeneratorApp {
         return current;
     }
     
+    addAxisLabels(size) {
+        const createTextSprite = (text, color) => {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 256;
+            canvas.height = 256;
+            
+            ctx.fillStyle = color;
+            ctx.font = 'Bold 120px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, 128, 128);
+            
+            const texture = new THREE.CanvasTexture(canvas);
+            const spriteMaterial = new THREE.SpriteMaterial({ 
+                map: texture,
+                depthTest: false,
+                depthWrite: false
+            });
+            const sprite = new THREE.Sprite(spriteMaterial);
+            sprite.scale.set(15, 15, 1);
+            
+            return sprite;
+        };
+
+        const xLabel = createTextSprite('X', '#ff0000');
+        xLabel.position.set(size * 1.1, 0, 0);
+        this.scene.add(xLabel);
+        this.axisLabels.push(xLabel);
+
+        const yLabel = createTextSprite('Y', '#00ff00');
+        yLabel.position.set(0, size * 1.1, 0);
+        this.scene.add(yLabel);
+        this.axisLabels.push(yLabel);
+
+        const zLabel = createTextSprite('Z', '#0000ff');
+        zLabel.position.set(0, 0, size * 1.1);
+        this.scene.add(zLabel);
+        this.axisLabels.push(zLabel);
+    }
+    
     clearScene() {
         if (this.originalMesh) {
             this.scene.remove(this.originalMesh);
@@ -778,6 +961,12 @@ class OffsetGeneratorApp {
             this.heightmapMesh.geometry.dispose();
             this.heightmapMesh.material.dispose();
             this.heightmapMesh = null;
+        }
+        if (this.heightmapLines) {
+            this.scene.remove(this.heightmapLines);
+            this.heightmapLines.geometry.dispose();
+            this.heightmapLines.material.dispose();
+            this.heightmapLines = null;
         }
         if (this.bboxHelper) {
             this.scene.remove(this.bboxHelper);
