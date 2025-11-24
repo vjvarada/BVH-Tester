@@ -191,6 +191,50 @@
             right: 0;
             z-index: 100;
         }
+        
+        /* Progress Bar Styles */
+        #progress-container {
+            margin-top: 15px;
+            display: none;
+        }
+        
+        #progress-container.active {
+            display: block;
+        }
+        
+        .progress-label {
+            font-size: 12px;
+            color: #4fc3f7;
+            margin-bottom: 5px;
+        }
+        
+        .progress-bar-wrapper {
+            width: 100%;
+            height: 20px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        .progress-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4fc3f7, #81c784);
+            border-radius: 10px;
+            transition: width 0.3s ease;
+            width: 0%;
+        }
+        
+        .progress-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 11px;
+            font-weight: bold;
+            color: #fff;
+            text-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
+        }
     </style>
 </head>
 <body>
@@ -211,8 +255,13 @@
             <label for="offset-distance">Offset Distance:</label>
             <input type="number" id="offset-distance" value="5" step="0.1" min="0" />
             
-            <label for="heightmap-resolution" style="margin-top: 10px;">Heightmap Resolution:</label>
-            <input type="number" id="heightmap-resolution" value="256" step="64" min="64" max="1024" />
+            <div class="checkbox-item" style="margin-top: 10px;">
+                <input type="checkbox" id="adaptive-resolution" checked />
+                <label for="adaptive-resolution">Adaptive Resolution (pixels per unit)</label>
+            </div>
+            
+            <label for="heightmap-resolution" style="margin-top: 10px;" id="resolution-label">Pixels Per Unit:</label>
+            <input type="number" id="heightmap-resolution" value="10" step="1" min="1" max="50" />
             
             <label for="smoothing-passes" style="margin-top: 10px;">Smoothing Passes: <span id="smoothing-value">2</span></label>
             <input type="range" id="smoothing-passes" min="0" max="5" value="2" step="1" style="width: 100%;" />
@@ -232,11 +281,11 @@
                     <label for="show-original">Show Original Mesh</label>
                 </div>
                 <div class="checkbox-item">
-                    <input type="checkbox" id="show-offset" checked />
+                    <input type="checkbox" id="show-offset" />
                     <label for="show-offset">Show Offset Mesh</label>
                 </div>
                 <div class="checkbox-item">
-                    <input type="checkbox" id="show-heightmap" />
+                    <input type="checkbox" id="show-heightmap" checked />
                     <label for="show-heightmap">Show Heightmap Mesh</label>
                 </div>
                 <div class="checkbox-item">
@@ -261,6 +310,15 @@
         <!-- Status Log -->
         <div id="status">
             <div class="log-entry log-info">Ready to load STL file...</div>
+        </div>
+        
+        <!-- Progress Bar -->
+        <div id="progress-container">
+            <div class="progress-label" id="progress-label">Processing...</div>
+            <div class="progress-bar-wrapper">
+                <div class="progress-bar-fill" id="progress-bar-fill"></div>
+                <div class="progress-text" id="progress-text">0%</div>
+            </div>
         </div>
     </div>
 
