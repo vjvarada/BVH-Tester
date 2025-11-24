@@ -1,76 +1,200 @@
-<!doctype html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Three.js BVH CSG Sweep Demo</title>
-  <style>
-    body {
-      margin: 0;
-      overflow: hidden;
-      font-family: Arial, sans-serif;
-      background: #e9ecf1;
-    }
-    #ui {
-      position: absolute;
-      top: 12px;
-      left: 12px;
-      padding: 10px 12px;
-      background: rgba(255, 255, 255, 0.9);
-      border-radius: 6px;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-      z-index: 10;
-    }
-    #ui label {
-      display: block;
-      font-weight: bold;
-      margin-bottom: 6px;
-    }
-    #ui input[type="range"] {
-      width: 220px;
-    }
-    #value {
-      font-weight: bold;
-      margin-left: 8px;
-    }
-  </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>STL BVH Viewer</title>
   <script type="importmap">
     {
       "imports": {
-        "three": "./node_modules/three/build/three.module.js",
-        "three/examples/jsm/controls/OrbitControls.js": "./node_modules/three/examples/jsm/controls/OrbitControls.js",
-        "three/examples/jsm/utils/BufferGeometryUtils.js": "./node_modules/three/examples/jsm/utils/BufferGeometryUtils.js",
-        "three-bvh-csg": "./node_modules/three-bvh-csg/build/index.module.js",
-        "three-mesh-bvh": "./node_modules/three-mesh-bvh/build/index.module.js"
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
       }
     }
   </script>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", sans-serif;
+      background: radial-gradient(circle at 20% 20%, #1c2333 0%, #0b1021 50%, #060912 100%);
+      color: #e8eefc;
+      overflow: hidden;
+    }
+    #toolbar {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      z-index: 10;
+      background: rgba(12, 18, 32, 0.75);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 10px;
+      padding: 10px 14px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+      backdrop-filter: blur(6px);
+    }
+    label {
+      font-weight: 600;
+      font-size: 14px;
+      letter-spacing: 0.02em;
+    }
+    input[type="file"] {
+      margin-top: 6px;
+      display: block;
+      color: #e8eefc;
+    }
+    canvas { display: block; }
+  </style>
 </head>
 <body>
-  <div id="ui">
-    <label for="coneY">Cone Y position</label>
-    <input id="coneY" type="range" min="0" max="2.5" step="0.05" value="1.0" />
-    <span id="coneYVal">1.00</span>
-    <br />
-    <label for="sweep">Sweep distance (+Y)</label>
-    <input id="sweep" type="range" min="0.5" max="6" step="0.05" value="5" />
-    <span id="sweepVal">5.00</span>
-    <br />
-    <label>
-      <input id="showSweep" type="checkbox" checked />
-      Show cutting volume
-    </label>
-    <br />
-    <label>
-      <input id="showBase" type="checkbox" checked />
-      Show base volume
-    </label>
-    <br />
-    <label>
-      <input id="showCutterOnly" type="checkbox" />
-      Show cutter only
-    </label>
+  <div id="toolbar">
+    <label for="fileInput">Load STL</label>
+    <input type="file" id="fileInput" accept=".stl" />
   </div>
-  <script type="module" src="./main.js"></script>
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+    import { OrbitControls } from 'https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js';
+    import { STLLoader } from 'https://unpkg.com/three@0.160.0/examples/jsm/loaders/STLLoader.js';
+    import {
+      acceleratedRaycast,
+      computeBoundsTree,
+      disposeBoundsTree,
+    } from 'https://unpkg.com/three-mesh-bvh@0.7.2/build/index.module.js';
+
+    // Patch prototypes for BVH support
+    THREE.Mesh.prototype.raycast = acceleratedRaycast;
+    THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+    THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+
+    const fileInput = document.getElementById('fileInput');
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0a0f1d);
+
+    const camera = new THREE.PerspectiveCamera(
+      60,
+      window.innerWidth / window.innerHeight,
+      0.1,
+      2000,
+    );
+    camera.position.set(80, 60, 80);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.target.set(0, 0, 0);
+
+    // Simple lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+    scene.add(ambientLight);
+
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+    dirLight.position.set(50, 80, 50);
+    scene.add(dirLight);
+
+    // Optional grid for spatial reference
+    const grid = new THREE.GridHelper(200, 20, 0x3355aa, 0x22335f);
+    scene.add(grid);
+
+    const loader = new STLLoader();
+    let currentMesh = null;
+
+    fileInput.addEventListener('change', handleFileSelection);
+    window.addEventListener('resize', onWindowResize);
+
+    function handleFileSelection(event) {
+      const file = event.target.files?.[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const arrayBuffer = e.target?.result;
+          const geometry = loader.parse(arrayBuffer);
+
+          // Compute normals and bounds before centering and BVH build
+          geometry.computeVertexNormals();
+          geometry.computeBoundingBox();
+          geometry.computeBoundingSphere();
+
+          centerGeometry(geometry);
+
+          const material = new THREE.MeshStandardMaterial({
+            color: 0x7db0ff,
+            metalness: 0.05,
+            roughness: 0.75,
+            flatShading: false,
+          });
+          const mesh = new THREE.Mesh(geometry, material);
+
+          // Replace any existing mesh
+          if (currentMesh) {
+            scene.remove(currentMesh);
+            currentMesh.geometry.disposeBoundsTree?.();
+            currentMesh.geometry.dispose();
+            currentMesh.material.dispose();
+          }
+          currentMesh = mesh;
+          scene.add(mesh);
+
+          fitCameraToGeometry(geometry);
+
+          // Build BVH and log info
+          geometry.computeBoundsTree();
+          geometry.computeBoundingBox();
+          const positionCount = geometry.attributes.position?.count || 0;
+          const triangleCount = Math.floor(positionCount / 3);
+          console.log('BVH successfully built for', file.name);
+          console.log('Vertices:', positionCount);
+          console.log('Triangles:', triangleCount);
+          console.log('Bounding box:', geometry.boundingBox);
+        } catch (err) {
+          console.error('Error loading STL:', err);
+        }
+      };
+      reader.onerror = (err) => console.error('Failed to read file:', err);
+      reader.readAsArrayBuffer(file);
+    }
+
+    function centerGeometry(geometry) {
+      if (!geometry.boundingBox) geometry.computeBoundingBox();
+      const box = geometry.boundingBox;
+      const center = new THREE.Vector3();
+      box.getCenter(center);
+      geometry.translate(-center.x, -center.y, -center.z);
+      geometry.computeBoundingBox();
+      geometry.computeBoundingSphere();
+    }
+
+    function fitCameraToGeometry(geometry) {
+      if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+      const sphere = geometry.boundingSphere;
+      const offset = sphere.radius * 2.5;
+      const direction = new THREE.Vector3(1, 1, 1).normalize();
+      camera.position.copy(direction.multiplyScalar(offset).add(sphere.center));
+      controls.target.copy(sphere.center);
+      controls.update();
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    animate();
+  </script>
 </body>
 </html>
