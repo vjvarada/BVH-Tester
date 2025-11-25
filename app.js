@@ -47,7 +47,6 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
-import { SimplifyModifier } from 'three/addons/modifiers/SimplifyModifier.js';
 import Stats from 'three/addons/libs/stats.module.js';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 
@@ -1441,29 +1440,22 @@ class OffsetGeneratorApp {
     }
     
     calculateOptimalMeshSettings(resolution, heightMap) {
-        // Memory limits for mesh creation (vertices * 2 for top+bottom * 3 floats * 4 bytes)
-        const MAX_VERTICES = 2000000; // ~2M vertices = ~48MB positions + ~96MB indices
-        const RECOMMENDED_VERTICES = 1000000; // ~1M vertices for smooth performance
+        // Get user-selected downsample factor from UI
+        const userDownsampleFactor = parseInt(document.getElementById('mesh-downsample').value) || 2;
         
+        // Memory limits for mesh creation
+        const MAX_VERTICES = 2000000; // ~2M vertices = safety limit
         const totalVertices = resolution * resolution;
         
-        let downsampleFactor = 1;
-        let quality = 'full';
-        let useAdaptiveSampling = false;
+        let downsampleFactor = userDownsampleFactor;
+        let quality = 'optimized';
         
-        // Determine downsampling strategy based on resolution
+        // Override if resolution is critically high
         if (totalVertices > MAX_VERTICES) {
-            // Critical: will crash without downsampling
-            downsampleFactor = Math.ceil(Math.sqrt(totalVertices / RECOMMENDED_VERTICES));
-            quality = 'reduced';
-            useAdaptiveSampling = true; // Use smart sampling for large meshes
-            console.warn(`Large heightmap detected (${resolution}x${resolution}). Adaptive downsampling by ${downsampleFactor}x to prevent crash.`);
-        } else if (totalVertices > RECOMMENDED_VERTICES) {
-            // Optional: recommend downsampling for better performance
-            downsampleFactor = Math.ceil(Math.sqrt(totalVertices / RECOMMENDED_VERTICES));
-            quality = 'balanced';
-            useAdaptiveSampling = true;
-            console.log(`Large heightmap detected (${resolution}x${resolution}). Adaptive downsampling by ${downsampleFactor}x for better performance.`);
+            const criticalDownsample = Math.ceil(Math.sqrt(totalVertices / MAX_VERTICES));
+            downsampleFactor = Math.max(userDownsampleFactor, criticalDownsample);
+            quality = 'auto-reduced';
+            console.warn(`Critical heightmap size (${resolution}x${resolution}). Forcing ${downsampleFactor}x downsample to prevent crash.`);
         }
         
         const effectiveResolution = Math.floor(resolution / downsampleFactor);
@@ -1475,8 +1467,7 @@ class OffsetGeneratorApp {
             effectiveResolution,
             quality,
             estimatedVertices,
-            estimatedTriangles,
-            useAdaptiveSampling
+            estimatedTriangles
         };
     }
     
@@ -2811,110 +2802,50 @@ class OffsetGeneratorApp {
         
         try {
             const originalGeometry = this.heightmapMesh.geometry;
-            const originalTriangles = originalGeometry.index.count / 3;
-            const shouldDecimate = document.getElementById('decimate-mesh').checked;
+            const triangleCount = originalGeometry.index.count / 3;
             
-            let geometryToExport;
-            let finalTriangles = originalTriangles;
-            
-            if (shouldDecimate) {
-                this.logStatus(`Starting decimation: ${originalTriangles.toLocaleString()} triangles...`, 'info');
-                this.showProgress('Decimating mesh...');
-                
-                // Clone geometry for decimation (don't modify the displayed mesh)
-                const geometryToDecimate = originalGeometry.clone();
-                
-                // Use SimplifyModifier for mesh decimation
-                const modifier = new SimplifyModifier();
-                
-                // Calculate target triangle count (reduce to 50% of original)
-                const targetTriangles = Math.floor(originalTriangles * 0.5);
-                
-                this.logStatus(`Target: ${targetTriangles.toLocaleString()} triangles (50% reduction)`, 'info');
-                
-                // Yield to UI before heavy computation
-                await this.delay(10);
-                
-                // Perform decimation
-                const decimatedGeometry = modifier.modify(geometryToDecimate, targetTriangles);
-                finalTriangles = decimatedGeometry.index.count / 3;
-                const reductionPercent = ((1 - finalTriangles / originalTriangles) * 100).toFixed(1);
-                
-                this.updateProgress(50, 1, 2);
-                this.logStatus(`✓ Decimation complete: ${finalTriangles.toLocaleString()} triangles (${reductionPercent}% reduction)`, 'success');
-                
-                // Cleanup
-                geometryToDecimate.dispose();
-                geometryToExport = decimatedGeometry;
-            } else {
-                this.logStatus(`Preparing mesh for export: ${originalTriangles.toLocaleString()} triangles...`, 'info');
-                this.showProgress('Preparing mesh...');
-                
-                // Clone geometry (don't modify the displayed mesh)
-                geometryToExport = originalGeometry.clone();
-                
-                this.updateProgress(50, 1, 2);
-            }
-            
-            // Yield to UI
-            await this.delay(10);
-            
-            // Fix and validate mesh
-            this.logStatus('Validating and fixing mesh...', 'info');
-            
-            // Ensure proper normals
-            geometryToExport.deleteAttribute('normal'); // Remove old normals
-            geometryToExport.computeVertexNormals(); // Recompute from face winding
-            
-            // Yield to UI
-            await this.delay(10);
-            
-            // Check for non-manifold edges and degenerate triangles
-            const fixedGeometry = await this.fixMeshIssues(geometryToExport);
-            
-            this.updateProgress(75, 3, 4);
+            this.logStatus(`Preparing mesh for export: ${triangleCount.toLocaleString()} triangles...`, 'info');
+            this.showProgress('Exporting mesh...');
             
             // Yield to UI
             await this.delay(10);
             
             // Verify watertightness
-            const isWatertight = this.verifyWatertightness(fixedGeometry);
+            const isWatertight = this.verifyWatertightness(originalGeometry);
             if (isWatertight) {
                 this.logStatus('✓ Mesh is watertight', 'success');
             } else {
-                this.logStatus('⚠ Warning: Mesh may have small gaps', 'info');
+                this.logStatus('⚠ Warning: Mesh may have gaps', 'info');
             }
+            
+            this.updateProgress(50, 1, 2);
             
             // Yield to UI
             await this.delay(10);
             
-            this.hideProgress();
-            
-            // Export fixed geometry
+            // Export geometry
             this.logStatus('Exporting to STL...', 'info');
             
             const exporter = new STLExporter();
-            const tempMesh = new THREE.Mesh(fixedGeometry);
-            const stlString = exporter.parse(tempMesh, { binary: false });
+            const tempMesh = new THREE.Mesh(originalGeometry);
+            const stlBinary = exporter.parse(tempMesh, { binary: true });
             
-            // Cleanup
-            fixedGeometry.dispose();
-            geometryToExport.dispose();
+            this.updateProgress(100, 2, 2);
+            this.hideProgress();
             
             // Create blob and download
-            const blob = new Blob([stlString], { type: 'text/plain' });
+            const blob = new Blob([stlBinary], { type: 'application/octet-stream' });
             const link = document.createElement('a');
             link.href = URL.createObjectURL(blob);
             
             // Generate filename with timestamp
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-            const suffix = shouldDecimate ? '_decimated' : '';
-            link.download = `offset_mesh${suffix}_${timestamp}.stl`;
+            link.download = `offset_mesh_${timestamp}.stl`;
             
             link.click();
             URL.revokeObjectURL(link.href);
             
-            this.logStatus(`✓ STL file downloaded: ${finalTriangles.toLocaleString()} triangles`, 'success');
+            this.logStatus(`✓ STL file downloaded: ${triangleCount.toLocaleString()} triangles`, 'success');
         } catch (error) {
             this.hideProgress();
             this.logStatus(`✗ Export failed: ${error.message}`, 'error');

@@ -262,15 +262,19 @@
             
             <label for="heightmap-resolution" style="margin-top: 10px;" id="resolution-label">Pixels Per Unit:</label>
             <input type="number" id="heightmap-resolution" value="10" step="1" min="1" max="50" />
+            
+            <label for="mesh-downsample" style="margin-top: 10px;">Mesh Optimization:</label>
+            <select id="mesh-downsample">
+                <option value="1">Full Quality (1x)</option>
+                <option value="2" selected>Optimized (2x downsample)</option>
+                <option value="3">Fast (3x downsample)</option>
+                <option value="4">Ultra Fast (4x downsample)</option>
+            </select>
         </div>
 
         <!-- Generate Button -->
         <div class="section">
             <button id="generate-btn" disabled>⚡ Generate Projected Offset</button>
-            <div class="checkbox-item" style="margin-top: 10px;">
-                <input type="checkbox" id="decimate-mesh" />
-                <label for="decimate-mesh">Decimate mesh (50% reduction)</label>
-            </div>
             <button id="export-stl-btn" disabled>💾 Export STL</button>
         </div>
 
