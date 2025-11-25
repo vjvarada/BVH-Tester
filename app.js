@@ -1604,21 +1604,9 @@ class OffsetGeneratorApp {
         const clipZMin = originalBox.min.z - offsetDistance;
         const clipZMax = originalBox.max.z + offsetDistance;
         
-        // Optimize heightmap before mesh creation by removing flat regions
-        this.logStatus('Simplifying flat regions in heightmap...', 'info');
-        const simplificationResult = this.simplifyHeightmap(heightMap, resolution, scale, center, clipZMin, clipZMax);
-        
-        this.logStatus(`Creating optimized mesh (${simplificationResult.vertices.length / 3} vertices from ${resolution * resolution})...`, 'info');
-        
-        // Create mesh geometry from simplified heightmap
-        const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.BufferAttribute(simplificationResult.vertices, 3));
-        geometry.setIndex(new THREE.BufferAttribute(simplificationResult.indices, 1));
-        geometry.computeVertexNormals();
-        
-        // Further optimize the mesh geometry
-        this.logStatus('Optimizing mesh geometry...', 'info');
-        this.optimizeMeshGeometry(geometry, resolution);
+        // Create watertight mesh from heightmap - bottom at clipZMin to match the full projected range
+        this.logStatus('Creating watertight mesh...', 'info');
+        const geometry = this.createWatertightMeshFromHeightmap(heightMap, resolution, scale, center, clipZMin, clipZMax, result);
         
         // Create material with wireframe overlay
         const material = new THREE.MeshStandardMaterial({
@@ -1638,8 +1626,227 @@ class OffsetGeneratorApp {
         // Create contour lines for visualization - pass heightmap and clipping bounds to avoid reloading
         await this.createHeightmapContourLines(result, heightMap, offsetDistance, clipZMin, clipZMax);
         
-        const finalVertexCount = simplificationResult.vertices.length / 3;
-        this.logStatus(`✓ Mesh created from heightmap: ${resolution}x${resolution} (${finalVertexCount.toLocaleString()} vertices)`, 'success');
+        const finalVertexCount = geometry.getAttribute('position').count;
+        this.logStatus(`✓ Watertight mesh created: ${finalVertexCount.toLocaleString()} vertices`, 'success');
+    }
+    
+    createWatertightMeshFromHeightmap(heightMap, resolution, scale, center, clipZMin, clipZMax, result) {
+        const startTime = performance.now();
+        
+        // Pre-calculate coordinate transformation constants
+        const invResMinusOne = 1 / (resolution - 1);
+        const invScale = 1 / scale;
+        
+        // Step 1: Identify non-zero heightmap points and create vertex grid
+        const vertexGrid = new Array(resolution * resolution);
+        const validVertices = [];
+        
+        // Find the minimum height in the heightmap - this represents the projection plane
+        let minHeight = Infinity;
+        for (let i = 0; i < heightMap.length; i++) {
+            minHeight = Math.min(minHeight, heightMap[i]);
+        }
+        
+        const heightThreshold = 0.001; // Consider heights near minimum as "on the plane"
+        let deletedCount = 0;
+        
+        console.log(`Heightmap min: ${minHeight}, bottom will be at: ${clipZMin}, will delete vertices within ${heightThreshold} of minimum`);
+        
+        for (let j = 0; j < resolution; j++) {
+            const flippedJ = resolution - 1 - j;
+            const yCoord = ((flippedJ * 2 * invResMinusOne - 1) + center.y) * invScale;
+            
+            for (let i = 0; i < resolution; i++) {
+                const heightIdx = flippedJ * resolution + i;
+                const gridIdx = j * resolution + i;
+                
+                // Get RAW height value from heightmap
+                const rawHeight = heightMap[heightIdx];
+                
+                // Only keep vertices where the height is significantly above the minimum (projection plane)
+                if (Math.abs(rawHeight - minHeight) > heightThreshold) {
+                    // Calculate XY position
+                    const x = ((i * 2 * invResMinusOne - 1) + center.x) * invScale;
+                    const y = yCoord;
+                    
+                    // Transform height to world Z
+                    let worldZ = (rawHeight + center.z) * invScale;
+                    worldZ = Math.max(clipZMin, Math.min(clipZMax, worldZ));
+                    
+                    const vertexIndex = validVertices.length;
+                    
+                    validVertices.push({
+                        gridI: i,
+                        gridJ: j,
+                        topPos: new THREE.Vector3(x, y, worldZ),
+                        bottomPos: new THREE.Vector3(x, y, clipZMin), // Bottom at minimum clipping bound
+                        topIndex: -1,
+                        bottomIndex: -1
+                    });
+                    
+                    vertexGrid[gridIdx] = vertexIndex;
+                } else {
+                    vertexGrid[gridIdx] = null; // Mark as on XY plane (deleted)
+                    deletedCount++;
+                }
+            }
+        }
+        
+        this.logStatus(`Filtered ${validVertices.length} vertices, deleted ${deletedCount} planar vertices from ${resolution * resolution} total`, 'info');
+        
+        // Step 2: Build vertex arrays
+        const positions = [];
+        
+        // Add top surface vertices
+        validVertices.forEach((v, idx) => {
+            v.topIndex = positions.length / 3;
+            positions.push(v.topPos.x, v.topPos.y, v.topPos.z);
+        });
+        
+        // Add bottom surface vertices
+        validVertices.forEach((v, idx) => {
+            v.bottomIndex = positions.length / 3;
+            positions.push(v.bottomPos.x, v.bottomPos.y, v.bottomPos.z);
+        });
+        
+        // Step 3: Build top surface triangles
+        const indices = [];
+        
+        for (let j = 0; j < resolution - 1; j++) {
+            for (let i = 0; i < resolution - 1; i++) {
+                const a = vertexGrid[j * resolution + i];
+                const b = vertexGrid[j * resolution + (i + 1)];
+                const c = vertexGrid[(j + 1) * resolution + i];
+                const d = vertexGrid[(j + 1) * resolution + (i + 1)];
+                
+                // Only create triangles if all 4 vertices exist
+                if (a !== null && b !== null && c !== null && d !== null) {
+                    const va = validVertices[a].topIndex;
+                    const vb = validVertices[b].topIndex;
+                    const vc = validVertices[c].topIndex;
+                    const vd = validVertices[d].topIndex;
+                    
+                    // Top surface - outward facing (CCW from above)
+                    indices.push(va, vb, vd);
+                    indices.push(va, vd, vc);
+                }
+            }
+        }
+        
+        // Step 4: Build bottom surface triangles (reversed winding)
+        for (let j = 0; j < resolution - 1; j++) {
+            for (let i = 0; i < resolution - 1; i++) {
+                const a = vertexGrid[j * resolution + i];
+                const b = vertexGrid[j * resolution + (i + 1)];
+                const c = vertexGrid[(j + 1) * resolution + i];
+                const d = vertexGrid[(j + 1) * resolution + (i + 1)];
+                
+                if (a !== null && b !== null && c !== null && d !== null) {
+                    const va = validVertices[a].bottomIndex;
+                    const vb = validVertices[b].bottomIndex;
+                    const vc = validVertices[c].bottomIndex;
+                    const vd = validVertices[d].bottomIndex;
+                    
+                    // Bottom surface - inward facing (CW from above)
+                    indices.push(va, vd, vb);
+                    indices.push(va, vc, vd);
+                }
+            }
+        }
+        
+        // Step 5: Build side walls by detecting boundary edges
+        // An edge is a boundary if it's on the grid boundary OR has a null neighbor
+        
+        const addWallQuad = (v1Top, v1Bottom, v2Top, v2Bottom) => {
+            // Outward facing wall
+            indices.push(v1Top, v2Top, v2Bottom);
+            indices.push(v1Top, v2Bottom, v1Bottom);
+        };
+        
+        // Horizontal edges (along i direction)
+        for (let j = 0; j < resolution; j++) {
+            for (let i = 0; i < resolution - 1; i++) {
+                const curr = vertexGrid[j * resolution + i];
+                const next = vertexGrid[j * resolution + (i + 1)];
+                
+                if (curr !== null && next !== null) {
+                    // Check if this edge is on a boundary
+                    const hasTopNeighbor = (j > 0) && vertexGrid[(j - 1) * resolution + i] !== null && vertexGrid[(j - 1) * resolution + (i + 1)] !== null;
+                    const hasBottomNeighbor = (j < resolution - 1) && vertexGrid[(j + 1) * resolution + i] !== null && vertexGrid[(j + 1) * resolution + (i + 1)] !== null;
+                    
+                    // Add wall if on boundary or has missing neighbor (hole/concave)
+                    if (j === 0 || !hasTopNeighbor) {
+                        // Front wall
+                        addWallQuad(
+                            validVertices[curr].topIndex,
+                            validVertices[curr].bottomIndex,
+                            validVertices[next].topIndex,
+                            validVertices[next].bottomIndex
+                        );
+                    }
+                    
+                    if (j === resolution - 1 || !hasBottomNeighbor) {
+                        // Back wall (reversed order for correct winding)
+                        addWallQuad(
+                            validVertices[next].topIndex,
+                            validVertices[next].bottomIndex,
+                            validVertices[curr].topIndex,
+                            validVertices[curr].bottomIndex
+                        );
+                    }
+                }
+            }
+        }
+        
+        // Vertical edges (along j direction)
+        for (let i = 0; i < resolution; i++) {
+            for (let j = 0; j < resolution - 1; j++) {
+                const curr = vertexGrid[j * resolution + i];
+                const next = vertexGrid[(j + 1) * resolution + i];
+                
+                if (curr !== null && next !== null) {
+                    const hasLeftNeighbor = (i > 0) && vertexGrid[j * resolution + (i - 1)] !== null && vertexGrid[(j + 1) * resolution + (i - 1)] !== null;
+                    const hasRightNeighbor = (i < resolution - 1) && vertexGrid[j * resolution + (i + 1)] !== null && vertexGrid[(j + 1) * resolution + (i + 1)] !== null;
+                    
+                    if (i === 0 || !hasLeftNeighbor) {
+                        // Left wall (reversed order for correct winding)
+                        addWallQuad(
+                            validVertices[next].topIndex,
+                            validVertices[next].bottomIndex,
+                            validVertices[curr].topIndex,
+                            validVertices[curr].bottomIndex
+                        );
+                    }
+                    
+                    if (i === resolution - 1 || !hasRightNeighbor) {
+                        // Right wall
+                        addWallQuad(
+                            validVertices[curr].topIndex,
+                            validVertices[curr].bottomIndex,
+                            validVertices[next].topIndex,
+                            validVertices[next].bottomIndex
+                        );
+                    }
+                }
+            }
+        }
+        
+        // Create geometry
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+        geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
+        geometry.computeVertexNormals();
+        
+        const endTime = performance.now();
+        const vertexCount = positions.length / 3;
+        const triangleCount = indices.length / 3;
+        
+        this.logStatus(
+            `Watertight mesh: ${vertexCount.toLocaleString()} vertices, ${triangleCount.toLocaleString()} triangles [${(endTime - startTime).toFixed(0)}ms]`,
+            'success'
+        );
+        
+        return geometry;
     }
     
     async createHeightmapContourLines(result, heightmapData, offsetDistance, clipZMin, clipZMax) {
