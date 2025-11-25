@@ -1573,6 +1573,51 @@ class OffsetGeneratorApp {
         
         console.log(`Extracting contours with spacing: ${spacing} (resolution: ${resolution})`);
         
+        // Helper function to break contour lines at zero height (base plane)
+        const breakAtZeroHeight = (points, zeroThreshold = 0.01) => {
+            const segments = [];
+            let currentSegment = [];
+            
+            for (let i = 0; i < points.length; i++) {
+                const point = points[i];
+                const isAtBase = Math.abs(point.z - clipZMin) < zeroThreshold;
+                
+                if (isAtBase) {
+                    // Add this point to current segment (end on base plane)
+                    if (currentSegment.length > 0) {
+                        currentSegment.push(point);
+                        segments.push(currentSegment);
+                        currentSegment = [];
+                    }
+                } else {
+                    // Check if previous point was at base (starting new segment from base)
+                    if (i > 0 && currentSegment.length === 0) {
+                        const prevPoint = points[i - 1];
+                        if (Math.abs(prevPoint.z - clipZMin) < zeroThreshold) {
+                            currentSegment.push(prevPoint); // Start segment from base plane
+                        }
+                    }
+                    currentSegment.push(point);
+                }
+            }
+            
+            // Add final segment if it has points
+            if (currentSegment.length > 1) {
+                segments.push(currentSegment);
+            }
+            
+            // Close each segment by connecting end to start
+            const closedSegments = segments.map(segment => {
+                if (segment.length > 1) {
+                    // Add the first point at the end to close the loop
+                    return [...segment, segment[0]];
+                }
+                return segment;
+            });
+            
+            return closedSegments;
+        };
+        
         // 0° - Horizontal lines (constant Y)
         for (let y = 0; y < resolution; y += spacing) {
             const points = [];
@@ -1587,7 +1632,10 @@ class OffsetGeneratorApp {
                 
                 points.push({ x: xCoord, y: yCoord, z: zCoord });
             }
-            contourLines.angle0.push(points);
+            
+            // Break into segments at zero height
+            const segments = breakAtZeroHeight(points);
+            contourLines.angle0.push(...segments);
         }
         
         // 90° - Vertical lines (constant X)
@@ -1604,7 +1652,10 @@ class OffsetGeneratorApp {
                 
                 points.push({ x: xCoord, y: yCoord, z: zCoord });
             }
-            contourLines.angle90.push(points);
+            
+            // Break into segments at zero height
+            const segments = breakAtZeroHeight(points);
+            contourLines.angle90.push(...segments);
         }
         
         // 45° - Diagonal lines (X + Y = constant)
@@ -1626,7 +1677,9 @@ class OffsetGeneratorApp {
             }
             
             if (points.length > 1) {
-                contourLines.angle45.push(points);
+                // Break into segments at zero height
+                const segments = breakAtZeroHeight(points);
+                contourLines.angle45.push(...segments);
             }
         }
         
@@ -1649,13 +1702,15 @@ class OffsetGeneratorApp {
             }
             
             if (points.length > 1) {
-                contourLines.angleNeg45.push(points);
+                // Break into segments at zero height
+                const segments = breakAtZeroHeight(points);
+                contourLines.angleNeg45.push(...segments);
             }
         }
         
         const totalLines = contourLines.angle0.length + contourLines.angle90.length + 
                           contourLines.angle45.length + contourLines.angleNeg45.length;
-        console.log(`Extracted ${totalLines} contour lines (0°: ${contourLines.angle0.length}, 90°: ${contourLines.angle90.length}, 45°: ${contourLines.angle45.length}, -45°: ${contourLines.angleNeg45.length})`);
+        console.log(`Extracted ${totalLines} contour line segments (0°: ${contourLines.angle0.length}, 90°: ${contourLines.angle90.length}, 45°: ${contourLines.angle45.length}, -45°: ${contourLines.angleNeg45.length})`);
         
         return contourLines;
     }
