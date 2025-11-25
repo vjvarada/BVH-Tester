@@ -46,6 +46,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { STLExporter } from 'three/addons/exporters/STLExporter.js';
+import { SimplifyModifier } from 'three/addons/modifiers/SimplifyModifier.js';
 import Stats from 'three/addons/libs/stats.module.js';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
 
@@ -614,31 +616,6 @@ class HeightmapTileDB {
             };
         });
     }
-    
-    // Cleanup old sessions to prevent database bloat
-    async cleanupOldSessions(maxAge = 3600000) { // 1 hour default
-        const cutoffTime = Date.now() - maxAge;
-        
-        return new Promise((resolve, reject) => {
-            const transaction = this.db.transaction(['tiles'], 'readwrite');
-            const store = transaction.objectStore('tiles');
-            const request = store.openCursor();
-            
-            request.onerror = () => reject(request.error);
-            request.onsuccess = (event) => {
-                const cursor = event.target.result;
-                if (cursor) {
-                    const sessionTimestamp = parseInt(cursor.value.sessionId.split('_')[1]);
-                    if (sessionTimestamp < cutoffTime) {
-                        cursor.delete();
-                    }
-                    cursor.continue();
-                } else {
-                    resolve();
-                }
-            };
-        });
-    }
 }
 
 // Global tile DB instance
@@ -1105,6 +1082,9 @@ class OffsetGeneratorApp {
         // Generate button
         document.getElementById('generate-btn').addEventListener('click', () => this.generateOffset());
         
+        // Export button
+        document.getElementById('export-stl-btn').addEventListener('click', () => this.exportSTL());
+        
         // Adaptive resolution toggle
         document.getElementById('adaptive-resolution').addEventListener('change', (e) => {
             const label = document.getElementById('resolution-label');
@@ -1455,6 +1435,9 @@ class OffsetGeneratorApp {
         
         const finalVertexCount = geometry.getAttribute('position').count;
         this.logStatus(`✓ Watertight mesh created: ${finalVertexCount.toLocaleString()} vertices`, 'success');
+        
+        // Enable export button
+        document.getElementById('export-stl-btn').disabled = false;
     }
     
     calculateOptimalMeshSettings(resolution, heightMap) {
@@ -1575,34 +1558,51 @@ class OffsetGeneratorApp {
         // Define subdivision parameters for smooth side walls
         const subdivisionSteps = 8; // Subdivide each wall edge into 8 segments for ultra-smooth walls
         
-        // Step 2: Build vertex arrays (pre-allocate for memory efficiency)
-        // Allocate extra space for subdivision vertices
-        const estimatedWallEdges = (workingResolution - 1) * 2 + workingResolution * 2; // Rough estimate of boundary edges
-        const extraVertices = estimatedWallEdges * (subdivisionSteps + 1) * 2; // subdivision vertices
-        const maxPositions = (validVertices.length * 2 + extraVertices) * 3; // top + bottom + subdivision vertices * 3 coords
-        const positions = new Float32Array(maxPositions);
-        let posIdx = 0;
+        // Step 2: Build manifold mesh with shared vertices
+        // Use a Map to ensure vertex uniqueness and proper sharing
+        const vertexMap = new Map(); // key: "x,y,z" -> index
+        const positions = [];
+        let nextVertexIndex = 0;
         
-        // Add top surface vertices
-        validVertices.forEach((v, idx) => {
-            v.topIndex = posIdx / 3;
-            positions[posIdx++] = v.topPos.x;
-            positions[posIdx++] = v.topPos.y;
-            positions[posIdx++] = v.topPos.z;
+        const getOrCreateVertex = (x, y, z) => {
+            // Round to avoid floating point precision issues
+            const key = `${x.toFixed(6)},${y.toFixed(6)},${z.toFixed(6)}`;
+            
+            if (vertexMap.has(key)) {
+                return vertexMap.get(key);
+            }
+            
+            const index = nextVertexIndex++;
+            positions.push(x, y, z);
+            vertexMap.set(key, index);
+            return index;
+        };
+        
+        // Create top and bottom vertices with shared vertex tracking
+        validVertices.forEach(v => {
+            v.topIndex = getOrCreateVertex(v.topPos.x, v.topPos.y, v.topPos.z);
+            v.bottomIndex = getOrCreateVertex(v.bottomPos.x, v.bottomPos.y, v.bottomPos.z);
         });
         
-        // Add bottom surface vertices
-        validVertices.forEach((v, idx) => {
-            v.bottomIndex = posIdx / 3;
-            positions[posIdx++] = v.bottomPos.x;
-            positions[posIdx++] = v.bottomPos.y;
-            positions[posIdx++] = v.bottomPos.z;
-        });
-        
-        // Step 3: Build top surface triangles (pre-allocate indices array)
-        const maxTriangles = (workingResolution - 1) * (workingResolution - 1) * 4 * 3; // 4 surfaces (top, bottom, 2 walls) * 2 triangles * 3 indices
-        const indices = new Uint32Array(maxTriangles);
+        // Step 3: Build triangles with dynamic array (avoid over-allocation)
+        // Use growable array pattern since we can't predict exact count with subdivision
+        let indices = [];
         let idxCount = 0;
+        
+        // Helper to ensure capacity and grow if needed
+        const ensureCapacity = (needed) => {
+            if (indices.length < needed) {
+                // Grow by 50% or to needed size, whichever is larger
+                const newSize = Math.max(needed, Math.floor(indices.length * 1.5));
+                const newIndices = new Uint32Array(newSize);
+                newIndices.set(indices);
+                indices = newIndices;
+            }
+        };
+        
+        // Initial allocation: top + bottom surfaces only
+        const surfaceTriangles = (workingResolution - 1) * (workingResolution - 1) * 4; // 2 triangles per quad, top + bottom
+        indices = new Uint32Array(surfaceTriangles * 3);
         
         for (let j = 0; j < workingResolution - 1; j++) {
             for (let i = 0; i < workingResolution - 1; i++) {
@@ -1618,9 +1618,10 @@ class OffsetGeneratorApp {
                     const vc = validVertices[c].topIndex;
                     const vd = validVertices[d].topIndex;
                     
-                    // Top surface - outward facing (CCW from above)
-                    indices[idxCount++] = va; indices[idxCount++] = vb; indices[idxCount++] = vd;
-                    indices[idxCount++] = va; indices[idxCount++] = vd; indices[idxCount++] = vc;
+                    // Top surface - CCW from above (normals point UP/outward)
+                    // Quad: a(top-left) b(top-right) d(bottom-right) c(bottom-left)
+                    indices[idxCount++] = va; indices[idxCount++] = vd; indices[idxCount++] = vb;
+                    indices[idxCount++] = va; indices[idxCount++] = vc; indices[idxCount++] = vd;
                 }
             }
         }
@@ -1639,64 +1640,42 @@ class OffsetGeneratorApp {
                     const vc = validVertices[c].bottomIndex;
                     const vd = validVertices[d].bottomIndex;
                     
-                    // Bottom surface - inward facing (CW from above)
-                    indices[idxCount++] = va; indices[idxCount++] = vd; indices[idxCount++] = vb;
-                    indices[idxCount++] = va; indices[idxCount++] = vc; indices[idxCount++] = vd;
+                    // Bottom surface - CW from above = CCW from below (normals point DOWN/outward)
+                    // Reverse winding compared to top surface
+                    indices[idxCount++] = va; indices[idxCount++] = vb; indices[idxCount++] = vd;
+                    indices[idxCount++] = va; indices[idxCount++] = vd; indices[idxCount++] = vc;
                 }
             }
         }
         
         // Step 5: Build side walls by detecting boundary edges with subdivision
-        // An edge is a boundary if it's on the grid boundary OR has a null neighbor
+        // Track edges to ensure each boundary edge gets exactly ONE wall
+        const processedEdges = new Set();
+        let wallCount = 0;
+        
+        const getEdgeKey = (v1, v2) => {
+            // Create canonical edge key (smaller index first)
+            return v1 < v2 ? `${v1},${v2}` : `${v2},${v1}`;
+        };
         
         const addWallQuadSubdivided = (v1Top, v1Bottom, v2Top, v2Bottom) => {
-            // Subdivide the wall quad for ultra-smooth side walls using cubic Hermite interpolation
-            const v1TopPos = new THREE.Vector3(positions[v1Top * 3], positions[v1Top * 3 + 1], positions[v1Top * 3 + 2]);
-            const v2TopPos = new THREE.Vector3(positions[v2Top * 3], positions[v2Top * 3 + 1], positions[v2Top * 3 + 2]);
-            const v1BottomPos = new THREE.Vector3(positions[v1Bottom * 3], positions[v1Bottom * 3 + 1], positions[v1Bottom * 3 + 2]);
-            const v2BottomPos = new THREE.Vector3(positions[v2Bottom * 3], positions[v2Bottom * 3 + 1], positions[v2Bottom * 3 + 2]);
+            // For manifold mesh: walls must share the EXACT vertices with top/bottom surfaces
+            // This means using the already-subdivided vertices from surface generation
+            // We cannot create new intermediate vertices here
             
-            // Create subdivision vertices along the edge
-            const subdivVertices = [];
-            for (let s = 0; s <= subdivisionSteps; s++) {
-                const t = s / subdivisionSteps;
-                
-                // Smooth cubic Hermite interpolation (smoothstep function)
-                // This creates C1 continuous curves with zero derivatives at endpoints
-                const smoothT = t * t * (3 - 2 * t);
-                
-                // Interpolate top and bottom positions with smooth curve
-                const topPos = new THREE.Vector3().lerpVectors(v1TopPos, v2TopPos, smoothT);
-                const bottomPos = new THREE.Vector3().lerpVectors(v1BottomPos, v2BottomPos, smoothT);
-                
-                // Add vertices to position array
-                const topIdx = posIdx / 3;
-                positions[posIdx++] = topPos.x;
-                positions[posIdx++] = topPos.y;
-                positions[posIdx++] = topPos.z;
-                
-                const bottomIdx = posIdx / 3;
-                positions[posIdx++] = bottomPos.x;
-                positions[posIdx++] = bottomPos.y;
-                positions[posIdx++] = bottomPos.z;
-                
-                subdivVertices.push({ top: topIdx, bottom: bottomIdx });
-            }
+            // Simply create a quad connecting the two edge vertices
+            ensureCapacity(idxCount + 6);
             
-            // Create triangles between subdivision segments
-            for (let s = 0; s < subdivisionSteps; s++) {
-                const curr = subdivVertices[s];
-                const next = subdivVertices[s + 1];
-                
-                // Outward facing wall quad (2 triangles)
-                indices[idxCount++] = curr.top;
-                indices[idxCount++] = next.top;
-                indices[idxCount++] = next.bottom;
-                
-                indices[idxCount++] = curr.top;
-                indices[idxCount++] = next.bottom;
-                indices[idxCount++] = curr.bottom;
-            }
+            // Two triangles for the wall quad
+            indices[idxCount++] = v1Top;
+            indices[idxCount++] = v2Top;
+            indices[idxCount++] = v2Bottom;
+            
+            indices[idxCount++] = v1Top;
+            indices[idxCount++] = v2Bottom;
+            indices[idxCount++] = v1Bottom;
+            
+            wallCount++;
         };
         
         // Horizontal edges (along i direction)
@@ -1706,29 +1685,43 @@ class OffsetGeneratorApp {
                 const next = vertexGrid[j * workingResolution + (i + 1)];
                 
                 if (curr !== null && next !== null) {
+                    const currTop = validVertices[curr].topIndex;
+                    const currBottom = validVertices[curr].bottomIndex;
+                    const nextTop = validVertices[next].topIndex;
+                    const nextBottom = validVertices[next].bottomIndex;
+                    
                     // Check if this edge is on a boundary
-                    const hasTopNeighbor = (j > 0) && vertexGrid[(j - 1) * workingResolution + i] !== null && vertexGrid[(j - 1) * workingResolution + (i + 1)] !== null;
-                    const hasBottomNeighbor = (j < workingResolution - 1) && vertexGrid[(j + 1) * workingResolution + i] !== null && vertexGrid[(j + 1) * workingResolution + (i + 1)] !== null;
+                    const above = (j > 0) ? vertexGrid[(j - 1) * workingResolution + i] : null;
+                    const aboveNext = (j > 0) ? vertexGrid[(j - 1) * workingResolution + (i + 1)] : null;
+                    const below = (j < workingResolution - 1) ? vertexGrid[(j + 1) * workingResolution + i] : null;
+                    const belowNext = (j < workingResolution - 1) ? vertexGrid[(j + 1) * workingResolution + (i + 1)] : null;
                     
-                    // Add wall if on boundary or has missing neighbor (hole/concave)
-                    if (j === 0 || !hasTopNeighbor) {
-                        // Front wall
-                        addWallQuadSubdivided(
-                            validVertices[curr].topIndex,
-                            validVertices[curr].bottomIndex,
-                            validVertices[next].topIndex,
-                            validVertices[next].bottomIndex
-                        );
-                    }
+                    // Wall needed if missing quad on either side
+                    const missingAbove = (above === null || aboveNext === null);
+                    const missingBelow = (below === null || belowNext === null);
                     
-                    if (j === workingResolution - 1 || !hasBottomNeighbor) {
-                        // Back wall (reversed order for correct winding)
-                        addWallQuadSubdivided(
-                            validVertices[next].topIndex,
-                            validVertices[next].bottomIndex,
-                            validVertices[curr].topIndex,
-                            validVertices[curr].bottomIndex
-                        );
+                    // Only create wall if exactly one side is missing (boundary edge)
+                    if (missingAbove && !missingBelow) {
+                        const edgeKey = getEdgeKey(currTop, nextTop);
+                        if (!processedEdges.has(edgeKey)) {
+                            processedEdges.add(edgeKey);
+                            // Front wall (looking from -j direction)
+                            addWallQuadSubdivided(currTop, currBottom, nextTop, nextBottom);
+                        }
+                    } else if (missingBelow && !missingAbove) {
+                        const edgeKey = getEdgeKey(currTop, nextTop);
+                        if (!processedEdges.has(edgeKey)) {
+                            processedEdges.add(edgeKey);
+                            // Back wall (looking from +j direction, reversed winding)
+                            addWallQuadSubdivided(nextTop, nextBottom, currTop, currBottom);
+                        }
+                    } else if (missingAbove && missingBelow) {
+                        // Both sides missing - this is a standalone edge, add wall with default orientation
+                        const edgeKey = getEdgeKey(currTop, nextTop);
+                        if (!processedEdges.has(edgeKey)) {
+                            processedEdges.add(edgeKey);
+                            addWallQuadSubdivided(currTop, currBottom, nextTop, nextBottom);
+                        }
                     }
                 }
             }
@@ -1741,48 +1734,68 @@ class OffsetGeneratorApp {
                 const next = vertexGrid[(j + 1) * workingResolution + i];
                 
                 if (curr !== null && next !== null) {
-                    const hasLeftNeighbor = (i > 0) && vertexGrid[j * workingResolution + (i - 1)] !== null && vertexGrid[(j + 1) * workingResolution + (i - 1)] !== null;
-                    const hasRightNeighbor = (i < workingResolution - 1) && vertexGrid[j * workingResolution + (i + 1)] !== null && vertexGrid[(j + 1) * workingResolution + (i + 1)] !== null;
+                    const currTop = validVertices[curr].topIndex;
+                    const currBottom = validVertices[curr].bottomIndex;
+                    const nextTop = validVertices[next].topIndex;
+                    const nextBottom = validVertices[next].bottomIndex;
                     
-                    if (i === 0 || !hasLeftNeighbor) {
-                        // Left wall (reversed order for correct winding)
-                        addWallQuadSubdivided(
-                            validVertices[next].topIndex,
-                            validVertices[next].bottomIndex,
-                            validVertices[curr].topIndex,
-                            validVertices[curr].bottomIndex
-                        );
-                    }
+                    // Check if this edge is on a boundary
+                    const left = (i > 0) ? vertexGrid[j * workingResolution + (i - 1)] : null;
+                    const leftNext = (i > 0) ? vertexGrid[(j + 1) * workingResolution + (i - 1)] : null;
+                    const right = (i < workingResolution - 1) ? vertexGrid[j * workingResolution + (i + 1)] : null;
+                    const rightNext = (i < workingResolution - 1) ? vertexGrid[(j + 1) * workingResolution + (i + 1)] : null;
                     
-                    if (i === workingResolution - 1 || !hasRightNeighbor) {
-                        // Right wall
-                        addWallQuadSubdivided(
-                            validVertices[curr].topIndex,
-                            validVertices[curr].bottomIndex,
-                            validVertices[next].topIndex,
-                            validVertices[next].bottomIndex
-                        );
+                    // Wall needed if missing quad on either side
+                    const missingLeft = (left === null || leftNext === null);
+                    const missingRight = (right === null || rightNext === null);
+                    
+                    // Only create wall if exactly one side is missing (boundary edge)
+                    if (missingLeft && !missingRight) {
+                        const edgeKey = getEdgeKey(currTop, nextTop);
+                        if (!processedEdges.has(edgeKey)) {
+                            processedEdges.add(edgeKey);
+                            // Left wall (looking from -i direction, reversed winding)
+                            addWallQuadSubdivided(nextTop, nextBottom, currTop, currBottom);
+                        }
+                    } else if (missingRight && !missingLeft) {
+                        const edgeKey = getEdgeKey(currTop, nextTop);
+                        if (!processedEdges.has(edgeKey)) {
+                            processedEdges.add(edgeKey);
+                            // Right wall (looking from +i direction)
+                            addWallQuadSubdivided(currTop, currBottom, nextTop, nextBottom);
+                        }
+                    } else if (missingLeft && missingRight) {
+                        // Both sides missing - this is a standalone edge, add wall with default orientation
+                        const edgeKey = getEdgeKey(currTop, nextTop);
+                        if (!processedEdges.has(edgeKey)) {
+                            processedEdges.add(edgeKey);
+                            addWallQuadSubdivided(currTop, currBottom, nextTop, nextBottom);
+                        }
                     }
                 }
             }
         }
         
-        // Create geometry with trimmed arrays (only actual used portion)
+        // Create geometry with actual used indices
         const finalIndices = new Uint32Array(indices.buffer, 0, idxCount);
+        const finalPositions = new Float32Array(positions);
         
         const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('position', new THREE.BufferAttribute(finalPositions, 3));
         geometry.setIndex(new THREE.BufferAttribute(finalIndices, 1));
         geometry.computeVertexNormals();
         
         const endTime = performance.now();
-        const vertexCount = positions.length / 3;
-        const triangleCount = indices.length / 3;
+        const vertexCount = finalPositions.length / 3;
+        const triangleCount = finalIndices.length / 3;
+        const sharedVertexCount = vertexMap.size;
         
         this.logStatus(
-            `Watertight mesh: ${vertexCount.toLocaleString()} vertices, ${triangleCount.toLocaleString()} triangles [${(endTime - startTime).toFixed(0)}ms]`,
+            `Manifold mesh: ${vertexCount.toLocaleString()} vertices (${sharedVertexCount.toLocaleString()} unique), ${triangleCount.toLocaleString()} triangles, ${wallCount} walls [${(endTime - startTime).toFixed(0)}ms]`,
             'success'
         );
+        
+        console.log(`Wall generation: ${wallCount} walls created, ${processedEdges.size} unique boundary edges`);
         
         return geometry;
     }
@@ -2593,67 +2606,6 @@ class OffsetGeneratorApp {
         return cubic(fy, samples[0], samples[1], samples[2], samples[3]);
     }
     
-    selectiveSmooth(heightMap, resolution, edgeThreshold) {
-        // Selective smoothing - only smooth high-frequency noise
-        const needsSmoothing = new Uint8Array(resolution * resolution);
-        
-        for (let j = 1; j < resolution - 1; j++) {
-            for (let i = 1; i < resolution - 1; i++) {
-                const idx = j * resolution + i;
-                const center = heightMap[idx];
-                
-                let variation = 0;
-                let count = 0;
-                for (let dj = -1; dj <= 1; dj++) {
-                    for (let di = -1; di <= 1; di++) {
-                        if (di === 0 && dj === 0) continue;
-                        const neighbor = heightMap[(j + dj) * resolution + (i + di)];
-                        variation += Math.abs(neighbor - center);
-                        count++;
-                    }
-                }
-                variation /= count;
-                
-                const gx = heightMap[idx + 1] - heightMap[idx - 1];
-                const gy = heightMap[idx + resolution] - heightMap[idx - resolution];
-                const gradStrength = Math.sqrt(gx * gx + gy * gy);
-                
-                if (variation > edgeThreshold * 0.5 && gradStrength < edgeThreshold) {
-                    needsSmoothing[idx] = 1;
-                }
-            }
-        }
-        
-        const smoothed = new Float32Array(heightMap.length);
-        smoothed.set(heightMap);
-        
-        for (let j = 1; j < resolution - 1; j++) {
-            for (let i = 1; i < resolution - 1; i++) {
-                const idx = j * resolution + i;
-                
-                if (needsSmoothing[idx]) {
-                    let sum = 0;
-                    const weights = [1, 2, 1, 2, 4, 2, 1, 2, 1];
-                    let weightSum = 0;
-                    let wi = 0;
-                    
-                    for (let dj = -1; dj <= 1; dj++) {
-                        for (let di = -1; di <= 1; di++) {
-                            const nidx = (j + dj) * resolution + (i + di);
-                            sum += heightMap[nidx] * weights[wi];
-                            weightSum += weights[wi];
-                            wi++;
-                        }
-                    }
-                    
-                    smoothed[idx] = sum / weightSum;
-                }
-            }
-        }
-        
-        heightMap.set(smoothed);
-    }
-    
     bilinearInterpolate(heightMap, resolution, x, y) {
         // Bilinear interpolation at fractional coordinates
         const x0 = Math.floor(x);
@@ -2681,34 +2633,6 @@ class OffsetGeneratorApp {
         const v0 = v00 * (1 - fx) + v10 * fx;
         const v1 = v01 * (1 - fx) + v11 * fx;
         return v0 * (1 - fy) + v1 * fy;
-    }
-    
-    sampleLowDetail(heightMap, resolution, srcI, srcJ, factor) {
-        // Low-detail sampling: use Gaussian-weighted average for smooth interpolation
-        
-        let weightedSum = 0;
-        let weightSum = 0;
-        const centerI = srcI + factor / 2;
-        const centerJ = srcJ + factor / 2;
-        const sigma = factor / 3; // Gaussian falloff
-        
-        for (let dj = 0; dj < factor; dj++) {
-            for (let di = 0; di < factor; di++) {
-                const sj = Math.min(resolution - 1, srcJ + dj);
-                const si = Math.min(resolution - 1, srcI + di);
-                
-                // Gaussian weight based on distance from block center
-                const distI = si - centerI;
-                const distJ = sj - centerJ;
-                const distSq = distI * distI + distJ * distJ;
-                const weight = Math.exp(-distSq / (2 * sigma * sigma));
-                
-                weightedSum += heightMap[sj * resolution + si] * weight;
-                weightSum += weight;
-            }
-        }
-        
-        return weightSum > 0 ? weightedSum / weightSum : 0;
     }
     
     adaptiveBilateralSmooth(heightMap, resolution, edgeThreshold) {
@@ -2772,40 +2696,6 @@ class OffsetGeneratorApp {
         }
         
         heightMap.set(smoothed);
-    }
-    
-    calculateEdgeThreshold(heightMap, resolution) {
-        // Calculate a reasonable edge detection threshold based on the heightmap's overall variance
-        let sum = 0;
-        let sumSq = 0;
-        const sampleSize = Math.min(10000, heightMap.length);
-        const step = Math.floor(heightMap.length / sampleSize);
-        
-        for (let i = 0; i < heightMap.length; i += step) {
-            const val = heightMap[i];
-            sum += val;
-            sumSq += val * val;
-        }
-        
-        const count = Math.ceil(heightMap.length / step);
-        const mean = sum / count;
-        const variance = (sumSq / count) - (mean * mean);
-        
-        // Use 10% of the global variance as edge threshold
-        // This adapts to the specific heightmap's characteristics
-        return variance * 0.1;
-    }
-    
-    smoothFlatRegions(heightMap, resolution, edgeThreshold) {
-        // Legacy function - replaced by adaptiveBilateralSmooth
-        // Kept for compatibility but not used in new multi-pass approach
-        console.warn('smoothFlatRegions is deprecated, use adaptiveBilateralSmooth instead');
-    }
-    
-    bilateralSmooth(heightMap, resolution, edgeThreshold) {
-        // Legacy function - replaced by adaptiveBilateralSmooth  
-        // Kept for compatibility but not used in new multi-pass approach
-        console.warn('bilateralSmooth is deprecated, use adaptiveBilateralSmooth instead');
     }
     
     async createHeightmapContourLines(result, heightmapData, offsetDistance, clipZMin, clipZMax) {
@@ -2913,8 +2803,302 @@ class OffsetGeneratorApp {
         this.logStatus(`✓ ${lines.length} contour lines created`, 'success');
     }
     
-
+    async exportSTL() {
+        if (!this.heightmapMesh) {
+            this.logStatus('✗ No heightmap mesh to export. Generate offset first.', 'error');
+            return;
+        }
+        
+        try {
+            const originalGeometry = this.heightmapMesh.geometry;
+            const originalTriangles = originalGeometry.index.count / 3;
+            const shouldDecimate = document.getElementById('decimate-mesh').checked;
+            
+            let geometryToExport;
+            let finalTriangles = originalTriangles;
+            
+            if (shouldDecimate) {
+                this.logStatus(`Starting decimation: ${originalTriangles.toLocaleString()} triangles...`, 'info');
+                this.showProgress('Decimating mesh...');
+                
+                // Clone geometry for decimation (don't modify the displayed mesh)
+                const geometryToDecimate = originalGeometry.clone();
+                
+                // Use SimplifyModifier for mesh decimation
+                const modifier = new SimplifyModifier();
+                
+                // Calculate target triangle count (reduce to 50% of original)
+                const targetTriangles = Math.floor(originalTriangles * 0.5);
+                
+                this.logStatus(`Target: ${targetTriangles.toLocaleString()} triangles (50% reduction)`, 'info');
+                
+                // Yield to UI before heavy computation
+                await this.delay(10);
+                
+                // Perform decimation
+                const decimatedGeometry = modifier.modify(geometryToDecimate, targetTriangles);
+                finalTriangles = decimatedGeometry.index.count / 3;
+                const reductionPercent = ((1 - finalTriangles / originalTriangles) * 100).toFixed(1);
+                
+                this.updateProgress(50, 1, 2);
+                this.logStatus(`✓ Decimation complete: ${finalTriangles.toLocaleString()} triangles (${reductionPercent}% reduction)`, 'success');
+                
+                // Cleanup
+                geometryToDecimate.dispose();
+                geometryToExport = decimatedGeometry;
+            } else {
+                this.logStatus(`Preparing mesh for export: ${originalTriangles.toLocaleString()} triangles...`, 'info');
+                this.showProgress('Preparing mesh...');
+                
+                // Clone geometry (don't modify the displayed mesh)
+                geometryToExport = originalGeometry.clone();
+                
+                this.updateProgress(50, 1, 2);
+            }
+            
+            // Yield to UI
+            await this.delay(10);
+            
+            // Fix and validate mesh
+            this.logStatus('Validating and fixing mesh...', 'info');
+            
+            // Ensure proper normals
+            geometryToExport.deleteAttribute('normal'); // Remove old normals
+            geometryToExport.computeVertexNormals(); // Recompute from face winding
+            
+            // Yield to UI
+            await this.delay(10);
+            
+            // Check for non-manifold edges and degenerate triangles
+            const fixedGeometry = await this.fixMeshIssues(geometryToExport);
+            
+            this.updateProgress(75, 3, 4);
+            
+            // Yield to UI
+            await this.delay(10);
+            
+            // Verify watertightness
+            const isWatertight = this.verifyWatertightness(fixedGeometry);
+            if (isWatertight) {
+                this.logStatus('✓ Mesh is watertight', 'success');
+            } else {
+                this.logStatus('⚠ Warning: Mesh may have small gaps', 'info');
+            }
+            
+            // Yield to UI
+            await this.delay(10);
+            
+            this.hideProgress();
+            
+            // Export fixed geometry
+            this.logStatus('Exporting to STL...', 'info');
+            
+            const exporter = new STLExporter();
+            const tempMesh = new THREE.Mesh(fixedGeometry);
+            const stlString = exporter.parse(tempMesh, { binary: false });
+            
+            // Cleanup
+            fixedGeometry.dispose();
+            geometryToExport.dispose();
+            
+            // Create blob and download
+            const blob = new Blob([stlString], { type: 'text/plain' });
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            
+            // Generate filename with timestamp
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+            const suffix = shouldDecimate ? '_decimated' : '';
+            link.download = `offset_mesh${suffix}_${timestamp}.stl`;
+            
+            link.click();
+            URL.revokeObjectURL(link.href);
+            
+            this.logStatus(`✓ STL file downloaded: ${finalTriangles.toLocaleString()} triangles`, 'success');
+        } catch (error) {
+            this.hideProgress();
+            this.logStatus(`✗ Export failed: ${error.message}`, 'error');
+            console.error('STL export error:', error);
+        }
+    }
     
+    async fixMeshIssues(geometry) {
+        // Manifold mesh should have no degenerate triangles, but check anyway
+        const positions = geometry.attributes.position.array;
+        const indices = geometry.index.array;
+        const newIndices = [];
+        
+        let removedTriangles = 0;
+        const epsilon = 1e-10;
+        
+        const totalTriangles = indices.length / 3;
+        const batchSize = 5000; // Process triangles in batches
+        
+        for (let batchStart = 0; batchStart < indices.length; batchStart += batchSize * 3) {
+            const batchEnd = Math.min(batchStart + batchSize * 3, indices.length);
+            
+            for (let i = batchStart; i < batchEnd; i += 3) {
+                const i0 = indices[i] * 3;
+                const i1 = indices[i + 1] * 3;
+                const i2 = indices[i + 2] * 3;
+                
+                // Get triangle vertices
+                const v0x = positions[i0], v0y = positions[i0 + 1], v0z = positions[i0 + 2];
+                const v1x = positions[i1], v1y = positions[i1 + 1], v1z = positions[i1 + 2];
+                const v2x = positions[i2], v2y = positions[i2 + 1], v2z = positions[i2 + 2];
+                
+                // Calculate edge vectors
+                const e1x = v1x - v0x, e1y = v1y - v0y, e1z = v1z - v0z;
+                const e2x = v2x - v0x, e2y = v2y - v0y, e2z = v2z - v0z;
+                
+                // Calculate cross product (normal) magnitude
+                const cx = e1y * e2z - e1z * e2y;
+                const cy = e1z * e2x - e1x * e2z;
+                const cz = e1x * e2y - e1y * e2x;
+                const areaSq = cx * cx + cy * cy + cz * cz;
+                
+                // Keep triangle if area is significant
+                if (areaSq > epsilon) {
+                    newIndices.push(indices[i], indices[i + 1], indices[i + 2]);
+                } else {
+                    removedTriangles++;
+                }
+            }
+            
+            // Yield to UI every batch
+            if (batchEnd < indices.length) {
+                await this.delay(1);
+            }
+        }
+        
+        if (removedTriangles > 0) {
+            this.logStatus(`✓ Removed ${removedTriangles} degenerate triangles`, 'success');
+            
+            // Create new geometry with cleaned indices
+            const cleanedGeometry = new THREE.BufferGeometry();
+            cleanedGeometry.setAttribute('position', geometry.attributes.position.clone());
+            cleanedGeometry.setIndex(newIndices);
+            cleanedGeometry.computeVertexNormals();
+            
+            return cleanedGeometry;
+        }
+        
+        this.logStatus('✓ No degenerate triangles found (manifold mesh)', 'success');
+        return geometry;
+    }
+    
+    delay(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+    
+    verifyWatertightness(geometry) {
+        // Build edge map to check if every edge is shared by exactly 2 triangles
+        const edges = new Map();
+        const indices = geometry.index.array;
+        const positions = geometry.attributes.position.array;
+        
+        // Track which triangles use each edge
+        const edgeTriangles = new Map();
+        
+        for (let i = 0; i < indices.length; i += 3) {
+            const triIdx = i / 3;
+            const v0 = indices[i];
+            const v1 = indices[i + 1];
+            const v2 = indices[i + 2];
+            
+            // Check all three edges of the triangle
+            const edges_in_tri = [
+                [v0, v1],
+                [v1, v2],
+                [v2, v0]
+            ];
+            
+            for (const [va, vb] of edges_in_tri) {
+                const key = va < vb ? `${va}_${vb}` : `${vb}_${va}`;
+                edges.set(key, (edges.get(key) || 0) + 1);
+                
+                if (!edgeTriangles.has(key)) {
+                    edgeTriangles.set(key, []);
+                }
+                edgeTriangles.get(key).push(triIdx);
+            }
+        }
+        
+        // Analyze non-manifold edges
+        let nonManifoldEdges = 0;
+        const edgesByCount = { '0': 0, '1': 0, '2': 0, '3+': 0 };
+        const debugReport = [];
+        
+        debugReport.push('\n========== MANIFOLD ANALYSIS ==========');
+        debugReport.push(`Total edges: ${edges.size}`);
+        debugReport.push(`Total triangles: ${indices.length / 3}`);
+        debugReport.push(`Total vertices: ${positions.length / 3}`);
+        
+        for (const [edge, count] of edges) {
+            if (count === 2) {
+                edgesByCount['2']++;
+            } else {
+                nonManifoldEdges++;
+                if (count === 1) edgesByCount['1']++;
+                else if (count === 0) edgesByCount['0']++;
+                else edgesByCount['3+']++;
+                
+                if (debugReport.length < 50) { // First 30 non-manifold edges
+                    const [v0, v1] = edge.split('_').map(Number);
+                    const p0 = [positions[v0*3], positions[v0*3+1], positions[v0*3+2]];
+                    const p1 = [positions[v1*3], positions[v1*3+1], positions[v1*3+2]];
+                    const tris = edgeTriangles.get(edge);
+                    
+                    debugReport.push(`\nEdge ${edge}: used by ${count} triangles`);
+                    debugReport.push(`  V${v0}: [${p0[0].toFixed(4)}, ${p0[1].toFixed(4)}, ${p0[2].toFixed(4)}]`);
+                    debugReport.push(`  V${v1}: [${p1[0].toFixed(4)}, ${p1[1].toFixed(4)}, ${p1[2].toFixed(4)}]`);
+                    debugReport.push(`  Triangles: ${tris.join(', ')}`);
+                }
+            }
+        }
+        
+        debugReport.push('\n========== EDGE STATISTICS ==========');
+        debugReport.push(`Manifold edges (count=2): ${edgesByCount['2']}`);
+        debugReport.push(`Boundary edges (count=1): ${edgesByCount['1']}`);
+        debugReport.push(`Over-shared edges (count=3+): ${edgesByCount['3+']}`);
+        debugReport.push(`Total non-manifold: ${nonManifoldEdges}`);
+        debugReport.push('======================================\n');
+        
+        // Output to console
+        console.log(debugReport.join('\n'));
+        
+        // Also create a downloadable report
+        const reportText = debugReport.join('\n');
+        const blob = new Blob([reportText], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'manifold_debug_report.txt';
+        link.textContent = 'Download Debug Report';
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        
+        if (nonManifoldEdges > 0) {
+            this.logStatus(`⚠ Found ${nonManifoldEdges} non-manifold edges - check console for debug report`, 'error');
+            
+            // Auto-download report
+            setTimeout(() => {
+                link.click();
+                URL.revokeObjectURL(url);
+                link.remove();
+            }, 100);
+        } else {
+            this.logStatus(`✓ All ${edges.size} edges are manifold`, 'success');
+        }
+        
+        return nonManifoldEdges === 0;
+    }
+    
+    addEdge(edgeMap, v0, v1) {
+        // Create canonical edge representation (smaller vertex index first)
+        const key = v0 < v1 ? `${v0}_${v1}` : `${v1}_${v0}`;
+        edgeMap.set(key, (edgeMap.get(key) || 0) + 1);
+    }
 
     
     addAxisLabels(size) {
