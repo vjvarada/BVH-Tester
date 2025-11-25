@@ -1105,11 +1105,6 @@ class OffsetGeneratorApp {
         // Generate button
         document.getElementById('generate-btn').addEventListener('click', () => this.generateOffset());
         
-        // Smoothing passes slider
-        document.getElementById('smoothing-passes').addEventListener('input', (e) => {
-            document.getElementById('smoothing-value').textContent = e.target.value;
-        });
-        
         // Adaptive resolution toggle
         document.getElementById('adaptive-resolution').addEventListener('change', (e) => {
             const label = document.getElementById('resolution-label');
@@ -1577,8 +1572,14 @@ class OffsetGeneratorApp {
         
         this.logStatus(`Filtered ${validVertices.length} vertices, deleted ${deletedCount} planar vertices from ${workingResolution * workingResolution} total`, 'info');
         
+        // Define subdivision parameters for smooth side walls
+        const subdivisionSteps = 8; // Subdivide each wall edge into 8 segments for ultra-smooth walls
+        
         // Step 2: Build vertex arrays (pre-allocate for memory efficiency)
-        const maxPositions = validVertices.length * 2 * 3; // top + bottom vertices * 3 coords
+        // Allocate extra space for subdivision vertices
+        const estimatedWallEdges = (workingResolution - 1) * 2 + workingResolution * 2; // Rough estimate of boundary edges
+        const extraVertices = estimatedWallEdges * (subdivisionSteps + 1) * 2; // subdivision vertices
+        const maxPositions = (validVertices.length * 2 + extraVertices) * 3; // top + bottom + subdivision vertices * 3 coords
         const positions = new Float32Array(maxPositions);
         let posIdx = 0;
         
@@ -1645,13 +1646,57 @@ class OffsetGeneratorApp {
             }
         }
         
-        // Step 5: Build side walls by detecting boundary edges
+        // Step 5: Build side walls by detecting boundary edges with subdivision
         // An edge is a boundary if it's on the grid boundary OR has a null neighbor
         
-        const addWallQuad = (v1Top, v1Bottom, v2Top, v2Bottom) => {
-            // Outward facing wall
-            indices[idxCount++] = v1Top; indices[idxCount++] = v2Top; indices[idxCount++] = v2Bottom;
-            indices[idxCount++] = v1Top; indices[idxCount++] = v2Bottom; indices[idxCount++] = v1Bottom;
+        const addWallQuadSubdivided = (v1Top, v1Bottom, v2Top, v2Bottom) => {
+            // Subdivide the wall quad for ultra-smooth side walls using cubic Hermite interpolation
+            const v1TopPos = new THREE.Vector3(positions[v1Top * 3], positions[v1Top * 3 + 1], positions[v1Top * 3 + 2]);
+            const v2TopPos = new THREE.Vector3(positions[v2Top * 3], positions[v2Top * 3 + 1], positions[v2Top * 3 + 2]);
+            const v1BottomPos = new THREE.Vector3(positions[v1Bottom * 3], positions[v1Bottom * 3 + 1], positions[v1Bottom * 3 + 2]);
+            const v2BottomPos = new THREE.Vector3(positions[v2Bottom * 3], positions[v2Bottom * 3 + 1], positions[v2Bottom * 3 + 2]);
+            
+            // Create subdivision vertices along the edge
+            const subdivVertices = [];
+            for (let s = 0; s <= subdivisionSteps; s++) {
+                const t = s / subdivisionSteps;
+                
+                // Smooth cubic Hermite interpolation (smoothstep function)
+                // This creates C1 continuous curves with zero derivatives at endpoints
+                const smoothT = t * t * (3 - 2 * t);
+                
+                // Interpolate top and bottom positions with smooth curve
+                const topPos = new THREE.Vector3().lerpVectors(v1TopPos, v2TopPos, smoothT);
+                const bottomPos = new THREE.Vector3().lerpVectors(v1BottomPos, v2BottomPos, smoothT);
+                
+                // Add vertices to position array
+                const topIdx = posIdx / 3;
+                positions[posIdx++] = topPos.x;
+                positions[posIdx++] = topPos.y;
+                positions[posIdx++] = topPos.z;
+                
+                const bottomIdx = posIdx / 3;
+                positions[posIdx++] = bottomPos.x;
+                positions[posIdx++] = bottomPos.y;
+                positions[posIdx++] = bottomPos.z;
+                
+                subdivVertices.push({ top: topIdx, bottom: bottomIdx });
+            }
+            
+            // Create triangles between subdivision segments
+            for (let s = 0; s < subdivisionSteps; s++) {
+                const curr = subdivVertices[s];
+                const next = subdivVertices[s + 1];
+                
+                // Outward facing wall quad (2 triangles)
+                indices[idxCount++] = curr.top;
+                indices[idxCount++] = next.top;
+                indices[idxCount++] = next.bottom;
+                
+                indices[idxCount++] = curr.top;
+                indices[idxCount++] = next.bottom;
+                indices[idxCount++] = curr.bottom;
+            }
         };
         
         // Horizontal edges (along i direction)
@@ -1668,7 +1713,7 @@ class OffsetGeneratorApp {
                     // Add wall if on boundary or has missing neighbor (hole/concave)
                     if (j === 0 || !hasTopNeighbor) {
                         // Front wall
-                        addWallQuad(
+                        addWallQuadSubdivided(
                             validVertices[curr].topIndex,
                             validVertices[curr].bottomIndex,
                             validVertices[next].topIndex,
@@ -1678,7 +1723,7 @@ class OffsetGeneratorApp {
                     
                     if (j === workingResolution - 1 || !hasBottomNeighbor) {
                         // Back wall (reversed order for correct winding)
-                        addWallQuad(
+                        addWallQuadSubdivided(
                             validVertices[next].topIndex,
                             validVertices[next].bottomIndex,
                             validVertices[curr].topIndex,
@@ -1701,7 +1746,7 @@ class OffsetGeneratorApp {
                     
                     if (i === 0 || !hasLeftNeighbor) {
                         // Left wall (reversed order for correct winding)
-                        addWallQuad(
+                        addWallQuadSubdivided(
                             validVertices[next].topIndex,
                             validVertices[next].bottomIndex,
                             validVertices[curr].topIndex,
@@ -1711,7 +1756,7 @@ class OffsetGeneratorApp {
                     
                     if (i === workingResolution - 1 || !hasRightNeighbor) {
                         // Right wall
-                        addWallQuad(
+                        addWallQuadSubdivided(
                             validVertices[curr].topIndex,
                             validVertices[curr].bottomIndex,
                             validVertices[next].topIndex,
@@ -1745,64 +1790,63 @@ class OffsetGeneratorApp {
     downsampleHeightmap(heightMap, resolution, factor) {
         const startTime = performance.now();
         
-        // Edge-focused adaptive downsampling for high-quality side walls
+        // Boundary-aware subdivision for pristine side walls
         // Strategy:
-        // 1. Detect boundary/edge regions (future side walls)
-        // 2. Apply high-quality supersampling to edge regions
-        // 3. Use fast interpolation for interior/flat regions
-        // 4. Minimal post-processing (edges already clean)
+        // 1. Identify active vertices (above minimum height threshold)
+        // 2. Detect boundary vertices that will become side walls
+        // 3. Subdivide boundary regions with high resolution
+        // 4. Downsample interior regions normally
         
         const newResolution = Math.floor(resolution / factor);
         const newHeightMap = new Float32Array(newResolution * newResolution);
         
-        // Pass 1: Detect edges and boundaries (these become side walls)
-        this.logStatus('Pass 1: Detecting edge/boundary regions...', 'info');
-        const edgeMap = this.detectBoundaryEdges(heightMap, resolution);
-        const edgeThreshold = this.calculateEdgeThreshold(heightMap, resolution);
+        // Pass 1: Identify active mesh regions (post-deletion simulation)
+        this.logStatus('Pass 1: Identifying active mesh boundaries...', 'info');
+        const boundaryMap = this.detectActiveMeshBoundaries(heightMap, resolution);
         
-        // Pass 2: Edge-targeted adaptive sampling
-        this.logStatus('Pass 2: Edge-focused supersampled resampling...', 'info');
+        // Pass 2: Boundary-targeted subdivision and adaptive sampling
+        this.logStatus('Pass 2: Subdividing boundaries and resampling...', 'info');
         for (let j = 0; j < newResolution; j++) {
             for (let i = 0; i < newResolution; i++) {
                 const srcJ = j * factor;
                 const srcI = i * factor;
                 
-                // Check if this block contains or is near an edge
-                let isNearEdge = false;
-                let maxEdgeStrength = 0;
+                // Check if this block contains actual mesh boundaries (future walls)
+                let isBoundary = false;
+                let maxBoundaryScore = 0;
                 
-                // Sample edge map in wider neighborhood (edges need context)
-                const edgeCheckRadius = Math.ceil(factor * 3.5); // Maximum coverage - 3.5x factor
+                // Sample boundary map in neighborhood
+                const boundaryCheckRadius = Math.ceil(factor * 2.0); // Check boundary vicinity
                 const blockCenterI = Math.floor(srcI + factor / 2);
                 const blockCenterJ = Math.floor(srcJ + factor / 2);
                 
-                for (let dj = -edgeCheckRadius; dj <= edgeCheckRadius; dj++) {
-                    for (let di = -edgeCheckRadius; di <= edgeCheckRadius; di++) {
+                for (let dj = -boundaryCheckRadius; dj <= boundaryCheckRadius; dj++) {
+                    for (let di = -boundaryCheckRadius; di <= boundaryCheckRadius; di++) {
                         const sampleJ = Math.min(resolution - 1, Math.max(0, blockCenterJ + dj));
                         const sampleI = Math.min(resolution - 1, Math.max(0, blockCenterI + di));
-                        const edgeStrength = edgeMap[sampleJ * resolution + sampleI];
+                        const boundaryScore = boundaryMap[sampleJ * resolution + sampleI];
                         
-                        if (edgeStrength > 0.08) { // Ultra-sensitive detection
-                            isNearEdge = true;
+                        if (boundaryScore > 0.5) { // Strong boundary detected
+                            isBoundary = true;
                         }
-                        maxEdgeStrength = Math.max(maxEdgeStrength, edgeStrength);
+                        maxBoundaryScore = Math.max(maxBoundaryScore, boundaryScore);
                     }
                 }
                 
                 let sampledValue;
                 
-                if (isNearEdge && maxEdgeStrength > 0.15) { // Maximum 10x10 coverage
-                    // EDGE REGION: Apply ultra-high-quality 10x10 supersampling for pristine walls
-                    // This is critical for side wall quality - no compromises here
-                    sampledValue = this.supersampleEdgeRegion(heightMap, resolution, srcI, srcJ, factor, edgeMap);
-                } else if (maxEdgeStrength > 0.08) { // Widest possible Lanczos coverage
-                    // NEAR EDGE: Use Lanczos for smooth transition zones
+                if (isBoundary && maxBoundaryScore > 0.8) {
+                    // BOUNDARY WALL: Maximum subdivision with 16x16 supersampling
+                    // These pixels will literally become the visible side walls
+                    sampledValue = this.subdivideBoundary(heightMap, resolution, srcI, srcJ, factor, 16);
+                } else if (maxBoundaryScore > 0.5) {
+                    // NEAR BOUNDARY: High-quality 12x12 supersampling
+                    sampledValue = this.subdivideBoundary(heightMap, resolution, srcI, srcJ, factor, 12);
+                } else if (maxBoundaryScore > 0.2) {
+                    // BOUNDARY INFLUENCE: Lanczos reconstruction
                     sampledValue = this.sampleLanczos2(heightMap, resolution, srcI + factor/2, srcJ + factor/2, factor);
-                } else if (maxEdgeStrength > 0.03) { // Maximum bicubic coverage
-                    // MEDIUM DETAIL: Bicubic interpolation
-                    sampledValue = this.sampleBicubic(heightMap, resolution, srcI + factor/2, srcJ + factor/2);
                 } else {
-                    // FLAT INTERIOR: Fast bilinear interpolation
+                    // INTERIOR: Fast bilinear interpolation (no walls here)
                     sampledValue = this.bilinearInterpolate(heightMap, resolution, srcI + factor/2, srcJ + factor/2);
                 }
                 
@@ -1822,8 +1866,148 @@ class OffsetGeneratorApp {
         };
     }
     
-    detectBoundaryEdges(heightMap, resolution) {
-        // Enhanced multi-scale boundary and edge detection
+    detectActiveMeshBoundaries(heightMap, resolution) {
+        // Detect actual mesh boundaries that will become side walls
+        // Simulates the vertex deletion that happens in createWatertightMeshFromHeightmap
+        
+        const boundaryMap = new Float32Array(resolution * resolution);
+        
+        // Find minimum height (same threshold as mesh creation)
+        let minHeight = Infinity;
+        for (let i = 0; i < heightMap.length; i++) {
+            minHeight = Math.min(minHeight, heightMap[i]);
+        }
+        
+        const heightThreshold = 0.001; // Same as mesh creation
+        
+        // Create active vertex map (vertices that will survive deletion)
+        const isActive = new Uint8Array(resolution * resolution);
+        for (let i = 0; i < heightMap.length; i++) {
+            isActive[i] = Math.abs(heightMap[i] - minHeight) > heightThreshold ? 1 : 0;
+        }
+        
+        // Detect boundary vertices: active vertices with at least one inactive neighbor
+        // These are the EXACT vertices that will form side walls
+        for (let j = 0; j < resolution; j++) {
+            for (let i = 0; i < resolution; i++) {
+                const idx = j * resolution + i;
+                
+                if (!isActive[idx]) {
+                    boundaryMap[idx] = 0; // Deleted vertex, not a boundary
+                    continue;
+                }
+                
+                // Check all 8 neighbors for inactive vertices
+                let hasInactiveNeighbor = false;
+                let inactiveCount = 0;
+                
+                for (let dj = -1; dj <= 1; dj++) {
+                    for (let di = -1; di <= 1; di++) {
+                        if (di === 0 && dj === 0) continue;
+                        
+                        const ni = i + di;
+                        const nj = j + dj;
+                        
+                        // Edge of heightmap is always considered boundary
+                        if (ni < 0 || ni >= resolution || nj < 0 || nj >= resolution) {
+                            hasInactiveNeighbor = true;
+                            inactiveCount++;
+                            continue;
+                        }
+                        
+                        const nidx = nj * resolution + ni;
+                        if (!isActive[nidx]) {
+                            hasInactiveNeighbor = true;
+                            inactiveCount++;
+                        }
+                    }
+                }
+                
+                if (hasInactiveNeighbor) {
+                    // This is a boundary vertex - will become a side wall
+                    // Score based on how many inactive neighbors (more = stronger boundary)
+                    boundaryMap[idx] = Math.min(1.0, inactiveCount / 4.0);
+                } else {
+                    // Interior vertex - no wall here
+                    boundaryMap[idx] = 0;
+                }
+            }
+        }
+        
+        return boundaryMap;
+    }
+    
+    subdivideBoundary(heightMap, resolution, srcI, srcJ, factor, subdivisionFactor) {
+        // High-resolution subdivision specifically for boundary regions
+        // Uses dense sampling to create smooth side walls
+        
+        const samples = [];
+        const weights = [];
+        
+        for (let dj = 0; dj < factor; dj++) {
+            for (let di = 0; di < factor; di++) {
+                for (let ssj = 0; ssj < subdivisionFactor; ssj++) {
+                    for (let ssi = 0; ssi < subdivisionFactor; ssi++) {
+                        const subI = (ssi + 0.5) / subdivisionFactor;
+                        const subJ = (ssj + 0.5) / subdivisionFactor;
+                        
+                        const posI = srcI + di + subI;
+                        const posJ = srcJ + dj + subJ;
+                        
+                        const value = this.bilinearInterpolate(heightMap, resolution, posI, posJ);
+                        samples.push(value);
+                        
+                        // Gaussian weighting
+                        const centerI = srcI + factor / 2;
+                        const centerJ = srcJ + factor / 2;
+                        const dx = posI - centerI;
+                        const dy = posJ - centerJ;
+                        const distSq = dx * dx + dy * dy;
+                        const sigma = factor / 2;
+                        const weight = Math.exp(-distSq / (2 * sigma * sigma));
+                        weights.push(weight);
+                    }
+                }
+            }
+        }
+        
+        if (samples.length === 0) {
+            return heightMap[Math.min(resolution - 1, Math.floor(srcJ + factor/2)) * resolution + 
+                            Math.min(resolution - 1, Math.floor(srcI + factor/2))];
+        }
+        
+        // Weighted average with outlier filtering
+        let sum = 0, totalWeight = 0;
+        for (let i = 0; i < samples.length; i++) {
+            sum += samples[i] * weights[i];
+            totalWeight += weights[i];
+        }
+        const mean = sum / totalWeight;
+        
+        // Compute standard deviation
+        let variance = 0;
+        for (let i = 0; i < samples.length; i++) {
+            const diff = samples[i] - mean;
+            variance += diff * diff * weights[i];
+        }
+        variance /= totalWeight;
+        const stdDev = Math.sqrt(variance);
+        
+        // Remove outliers
+        sum = 0;
+        totalWeight = 0;
+        for (let i = 0; i < samples.length; i++) {
+            if (Math.abs(samples[i] - mean) < 2.5 * stdDev) {
+                sum += samples[i] * weights[i];
+                totalWeight += weights[i];
+            }
+        }
+        
+        return totalWeight > 0 ? sum / totalWeight : mean;
+    }
+    
+    bilinearInterpolate(heightMap, resolution, x, y) {
+        // LEGACY: Enhanced multi-scale boundary and edge detection
         // Detects regions that will become side walls with high precision
         
         const edgeMap = new Float32Array(resolution * resolution);
@@ -2064,18 +2248,36 @@ class OffsetGeneratorApp {
         return totalWeight > 0 ? sum / totalWeight : mean;
     }
     
-    computeImportanceMap(heightMap, resolution) {
-        // Legacy function - replaced by detectBoundaryEdges
-        // Kept for potential future use
-        console.warn('computeImportanceMap deprecated, using detectBoundaryEdges instead');
-        return this.detectBoundaryEdges(heightMap, resolution);
+    bilinearInterpolate(heightMap, resolution, x, y) {
+        // Bilinear interpolation at fractional coordinates
+        const x0 = Math.floor(x);
+        const y0 = Math.floor(y);
+        const x1 = Math.min(resolution - 1, x0 + 1);
+        const y1 = Math.min(resolution - 1, y0 + 1);
+        
+        // Clamp to valid range
+        const cx0 = Math.max(0, Math.min(resolution - 1, x0));
+        const cy0 = Math.max(0, Math.min(resolution - 1, y0));
+        const cx1 = Math.max(0, Math.min(resolution - 1, x1));
+        const cy1 = Math.max(0, Math.min(resolution - 1, y1));
+        
+        // Fractional parts
+        const fx = x - x0;
+        const fy = y - y0;
+        
+        // Sample four corners
+        const v00 = heightMap[cy0 * resolution + cx0];
+        const v10 = heightMap[cy0 * resolution + cx1];
+        const v01 = heightMap[cy1 * resolution + cx0];
+        const v11 = heightMap[cy1 * resolution + cx1];
+        
+        // Bilinear interpolation
+        const v0 = v00 * (1 - fx) + v10 * fx;
+        const v1 = v01 * (1 - fx) + v11 * fx;
+        return v0 * (1 - fy) + v1 * fy;
     }
     
-    computeGradientMap(heightMap, resolution) {
-        // Compute gradient magnitude at each pixel using Sobel operator
-        const gradientMap = new Float32Array(resolution * resolution);
-        
-        // Sobel kernels
+    sampleLanczos2(heightMap, resolution, x, y, windowSize) {
         const sobelX = [-1, 0, 1, -2, 0, 2, -1, 0, 1];
         const sobelY = [-1, -2, -1, 0, 0, 0, 1, 2, 1];
         
@@ -2297,6 +2499,35 @@ class OffsetGeneratorApp {
         return totalWeight > 0 ? weightedSum / totalWeight : mean;
     }
     
+    bilinearInterpolate(heightMap, resolution, x, y) {
+        // Bilinear interpolation at fractional coordinates
+        const x0 = Math.floor(x);
+        const y0 = Math.floor(y);
+        const x1 = Math.min(resolution - 1, x0 + 1);
+        const y1 = Math.min(resolution - 1, y0 + 1);
+        
+        // Clamp to valid range
+        const cx0 = Math.max(0, Math.min(resolution - 1, x0));
+        const cy0 = Math.max(0, Math.min(resolution - 1, y0));
+        const cx1 = Math.max(0, Math.min(resolution - 1, x1));
+        const cy1 = Math.max(0, Math.min(resolution - 1, y1));
+        
+        // Fractional parts
+        const fx = x - x0;
+        const fy = y - y0;
+        
+        // Sample four corners
+        const v00 = heightMap[cy0 * resolution + cx0];
+        const v10 = heightMap[cy0 * resolution + cx1];
+        const v01 = heightMap[cy1 * resolution + cx0];
+        const v11 = heightMap[cy1 * resolution + cx1];
+        
+        // Bilinear interpolation
+        const v0 = v00 * (1 - fx) + v10 * fx;
+        const v1 = v01 * (1 - fx) + v11 * fx;
+        return v0 * (1 - fy) + v1 * fy;
+    }
+    
     sampleLanczos2(heightMap, resolution, x, y, windowSize) {
         // Lanczos-2 windowed sinc interpolation - highest quality resampling
         const lanczos = (x, a = 2) => {
@@ -2332,7 +2563,7 @@ class OffsetGeneratorApp {
         return weightSum > 0 ? sum / weightSum : heightMap[Math.floor(y) * resolution + Math.floor(x)];
     }
     
-    sampleBicubic(heightMap, resolution, x, y) {
+    async createHeightmapContourLines(result, heightmapData, offsetDistance, clipZMin, clipZMax) {
         // Catmull-Rom bicubic interpolation
         const cubic = (t, p0, p1, p2, p3) => {
             return 0.5 * (
