@@ -1383,179 +1383,6 @@ class OffsetGeneratorApp {
         this.logStatus('✓ Offset mesh created', 'success');
     }
     
-    async createHeightmapVisualization(result) {
-        // Remove previous heightmap mesh
-        if (this.heightmapMesh) {
-            this.scene.remove(this.heightmapMesh);
-            this.heightmapMesh.geometry.dispose();
-            this.heightmapMesh.material.dispose();
-        }
-        
-        const { resolution, scale, center } = result;
-        
-        // Load heightmap data (from memory or IndexedDB)
-        let heightMap;
-        if (result.usesIndexedDB) {
-            this.showProgress('Loading from IndexedDB...');
-            this.logStatus('Loading heightmap from IndexedDB...', 'info');
-            
-            // Progress callback for loading tiles
-            const loadProgress = (current, total) => {
-                const percent = (current / total) * 100;
-                this.updateProgress(percent, current, total);
-            };
-            
-            heightMap = await loadHeightMapFromTiles(result, loadProgress);
-            this.hideProgress();
-            this.logStatus('✓ Heightmap loaded from IndexedDB', 'success');
-        } else {
-            heightMap = result.heightMap;
-        }
-        
-        if (!heightMap) {
-            this.logStatus('✗ Failed to load heightmap data', 'error');
-            return null;
-        }
-        
-        // No smoothing - preserve sharp edges
-        const smoothedHeightMap = heightMap;
-        
-        // For high resolutions, we'll downsample for visualization but keep full detail in the data
-        // Adaptive LOD: use more vertices for better quality display
-        const targetVertexCount = 1000000; // ~1000x1000 grid for high quality
-        const maxDisplayResolution = Math.floor(Math.sqrt(targetVertexCount));
-        const displayResolution = Math.min(resolution, maxDisplayResolution);
-        const downsampleStep = Math.max(1, Math.ceil(resolution / displayResolution));
-        
-        // Build custom geometry to handle any resolution efficiently
-        const geometry = new THREE.BufferGeometry();
-        const positions = [];
-        const indices = [];
-        const uvs = [];
-        
-        // Create vertices with downsampling if needed
-        for (let y = 0; y < resolution; y += downsampleStep) {
-            for (let x = 0; x < resolution; x += downsampleStep) {
-                // Map to normalized [-1, 1] space
-                const nx = (x / (resolution - 1)) * 2 - 1;
-                // Flip Y coordinate to match the heightmap data orientation
-                const ny = ((resolution - 1 - y) / (resolution - 1)) * 2 - 1;
-                
-                // Get height value with Y-flip
-                const heightValue = smoothedHeightMap[(resolution - 1 - y) * resolution + x];
-                
-                positions.push(nx, ny, heightValue);
-                uvs.push(x / (resolution - 1), 1.0 - (y / (resolution - 1))); // Flip UV Y as well
-            }
-        }
-        
-        // Calculate actual grid dimensions after downsampling
-        const gridWidth = Math.ceil(resolution / downsampleStep);
-        const gridHeight = Math.ceil(resolution / downsampleStep);
-        
-        // Create triangle indices for the grid
-        for (let y = 0; y < gridHeight - 1; y++) {
-            for (let x = 0; x < gridWidth - 1; x++) {
-                const a = y * gridWidth + x;
-                const b = y * gridWidth + (x + 1);
-                const c = (y + 1) * gridWidth + x;
-                const d = (y + 1) * gridWidth + (x + 1);
-                
-                // Two triangles per quad
-                indices.push(a, b, d);
-                indices.push(a, d, c);
-            }
-        }
-        
-        geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
-        geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uvs), 2));
-        geometry.setIndex(indices);
-        
-        // Compute smooth normals for better appearance
-        geometry.computeVertexNormals();
-        
-        // Apply additional smoothing to normals for even better visual quality
-        const normals = geometry.attributes.normal.array;
-        const smoothedNormals = new Float32Array(normals.length);
-        
-        for (let i = 0; i < normals.length; i += 3) {
-            const vertexIndex = i / 3;
-            const x = vertexIndex % gridWidth;
-            const y = Math.floor(vertexIndex / gridWidth);
-            
-            // Average with neighboring normals
-            let nx = normals[i];
-            let ny = normals[i + 1];
-            let nz = normals[i + 2];
-            let count = 1;
-            
-            // Check all 8 neighbors
-            for (let dy = -1; dy <= 1; dy++) {
-                for (let dx = -1; dx <= 1; dx++) {
-                    if (dx === 0 && dy === 0) continue;
-                    
-                    const neighborX = x + dx;
-                    const neighborY = y + dy;
-                    
-                    if (neighborX >= 0 && neighborX < gridWidth && 
-                        neighborY >= 0 && neighborY < gridHeight) {
-                        const neighborIndex = (neighborY * gridWidth + neighborX) * 3;
-                        nx += normals[neighborIndex];
-                        ny += normals[neighborIndex + 1];
-                        nz += normals[neighborIndex + 2];
-                        count++;
-                    }
-                }
-            }
-            
-            // Average and normalize
-            nx /= count;
-            ny /= count;
-            nz /= count;
-            const length = Math.sqrt(nx * nx + ny * ny + nz * nz);
-            
-            smoothedNormals[i] = nx / length;
-            smoothedNormals[i + 1] = ny / length;
-            smoothedNormals[i + 2] = nz / length;
-        }
-        
-        geometry.setAttribute('normal', new THREE.BufferAttribute(smoothedNormals, 3));
-        
-        // Use solid white color material
-        const material = new THREE.MeshStandardMaterial({ 
-            color: 0xffffff,
-            side: THREE.DoubleSide,
-            wireframe: false,
-            transparent: true,
-            opacity: 0.75,
-            metalness: 0.0,
-            roughness: 0.8
-        });
-        
-        this.heightmapMesh = new THREE.Mesh(geometry, material);
-        
-        // Scale back from normalized space
-        this.heightmapMesh.scale.set(1 / scale, 1 / scale, 1 / scale);
-        this.heightmapMesh.position.set(center.x / scale, center.y / scale, center.z / scale);
-        
-        this.heightmapMesh.visible = document.getElementById('show-heightmap').checked;
-        this.scene.add(this.heightmapMesh);
-        
-        const actualVertices = positions.length / 3;
-        if (downsampleStep > 1) {
-            this.logStatus(`✓ Heightmap mesh: ${resolution}x${resolution} data, ${gridWidth}x${gridHeight} display (${actualVertices.toLocaleString()} vertices)`, 'success');
-        } else {
-            this.logStatus(`✓ Heightmap mesh created: ${gridWidth}x${gridHeight} (${actualVertices.toLocaleString()} vertices)`, 'success');
-        }
-        
-        // Return smoothed data and display info for use by contour lines
-        return { 
-            smoothedHeightMap, 
-            displayResolution, 
-            downsampleStep 
-        };
-    }
-    
     async createMeshFromHeightmap(result, offsetDistance) {
         // Remove previous heightmap mesh and lines
         if (this.heightmapMesh) {
@@ -1606,7 +1433,12 @@ class OffsetGeneratorApp {
         
         // Create watertight mesh from heightmap - bottom at clipZMin to match the full projected range
         this.logStatus('Creating watertight mesh...', 'info');
-        const geometry = this.createWatertightMeshFromHeightmap(heightMap, resolution, scale, center, clipZMin, clipZMax, result);
+        
+        // Calculate optimal mesh resolution to prevent crashes on large heightmaps
+        const meshSettings = this.calculateOptimalMeshSettings(resolution, heightMap);
+        this.logStatus(`Mesh quality: ${meshSettings.quality}, effective resolution: ${meshSettings.effectiveResolution}x${meshSettings.effectiveResolution}`, 'info');
+        
+        const geometry = this.createWatertightMeshFromHeightmap(heightMap, resolution, scale, center, clipZMin, clipZMax, result, meshSettings);
         
         // Create material with wireframe overlay
         const material = new THREE.MeshStandardMaterial({
@@ -1630,21 +1462,72 @@ class OffsetGeneratorApp {
         this.logStatus(`✓ Watertight mesh created: ${finalVertexCount.toLocaleString()} vertices`, 'success');
     }
     
-    createWatertightMeshFromHeightmap(heightMap, resolution, scale, center, clipZMin, clipZMax, result) {
+    calculateOptimalMeshSettings(resolution, heightMap) {
+        // Memory limits for mesh creation (vertices * 2 for top+bottom * 3 floats * 4 bytes)
+        const MAX_VERTICES = 2000000; // ~2M vertices = ~48MB positions + ~96MB indices
+        const RECOMMENDED_VERTICES = 1000000; // ~1M vertices for smooth performance
+        
+        const totalVertices = resolution * resolution;
+        
+        let downsampleFactor = 1;
+        let quality = 'full';
+        let useAdaptiveSampling = false;
+        
+        // Determine downsampling strategy based on resolution
+        if (totalVertices > MAX_VERTICES) {
+            // Critical: will crash without downsampling
+            downsampleFactor = Math.ceil(Math.sqrt(totalVertices / RECOMMENDED_VERTICES));
+            quality = 'reduced';
+            useAdaptiveSampling = true; // Use smart sampling for large meshes
+            console.warn(`Large heightmap detected (${resolution}x${resolution}). Adaptive downsampling by ${downsampleFactor}x to prevent crash.`);
+        } else if (totalVertices > RECOMMENDED_VERTICES) {
+            // Optional: recommend downsampling for better performance
+            downsampleFactor = Math.ceil(Math.sqrt(totalVertices / RECOMMENDED_VERTICES));
+            quality = 'balanced';
+            useAdaptiveSampling = true;
+            console.log(`Large heightmap detected (${resolution}x${resolution}). Adaptive downsampling by ${downsampleFactor}x for better performance.`);
+        }
+        
+        const effectiveResolution = Math.floor(resolution / downsampleFactor);
+        const estimatedVertices = effectiveResolution * effectiveResolution * 2; // top + bottom
+        const estimatedTriangles = effectiveResolution * effectiveResolution * 4; // 2 per quad for top+bottom
+        
+        return {
+            downsampleFactor,
+            effectiveResolution,
+            quality,
+            estimatedVertices,
+            estimatedTriangles,
+            useAdaptiveSampling
+        };
+    }
+    
+    createWatertightMeshFromHeightmap(heightMap, resolution, scale, center, clipZMin, clipZMax, result, meshSettings = null) {
         const startTime = performance.now();
         
+        // Apply downsampling if needed for large heightmaps
+        let workingHeightMap = heightMap;
+        let workingResolution = resolution;
+        
+        if (meshSettings && meshSettings.downsampleFactor > 1) {
+            const downsampleResult = this.downsampleHeightmap(heightMap, resolution, meshSettings.downsampleFactor);
+            workingHeightMap = downsampleResult.heightMap;
+            workingResolution = downsampleResult.resolution;
+            this.logStatus(`Downsampled heightmap: ${resolution}x${resolution} → ${workingResolution}x${workingResolution}`, 'info');
+        }
+        
         // Pre-calculate coordinate transformation constants
-        const invResMinusOne = 1 / (resolution - 1);
+        const invResMinusOne = 1 / (workingResolution - 1);
         const invScale = 1 / scale;
         
         // Step 1: Identify non-zero heightmap points and create vertex grid
-        const vertexGrid = new Array(resolution * resolution);
+        const vertexGrid = new Array(workingResolution * workingResolution);
         const validVertices = [];
         
         // Find the minimum height in the heightmap - this represents the projection plane
         let minHeight = Infinity;
-        for (let i = 0; i < heightMap.length; i++) {
-            minHeight = Math.min(minHeight, heightMap[i]);
+        for (let i = 0; i < workingHeightMap.length; i++) {
+            minHeight = Math.min(minHeight, workingHeightMap[i]);
         }
         
         const heightThreshold = 0.001; // Consider heights near minimum as "on the plane"
@@ -1652,16 +1535,16 @@ class OffsetGeneratorApp {
         
         console.log(`Heightmap min: ${minHeight}, bottom will be at: ${clipZMin}, will delete vertices within ${heightThreshold} of minimum`);
         
-        for (let j = 0; j < resolution; j++) {
-            const flippedJ = resolution - 1 - j;
+        for (let j = 0; j < workingResolution; j++) {
+            const flippedJ = workingResolution - 1 - j;
             const yCoord = ((flippedJ * 2 * invResMinusOne - 1) + center.y) * invScale;
             
-            for (let i = 0; i < resolution; i++) {
-                const heightIdx = flippedJ * resolution + i;
-                const gridIdx = j * resolution + i;
+            for (let i = 0; i < workingResolution; i++) {
+                const heightIdx = flippedJ * workingResolution + i;
+                const gridIdx = j * workingResolution + i;
                 
                 // Get RAW height value from heightmap
-                const rawHeight = heightMap[heightIdx];
+                const rawHeight = workingHeightMap[heightIdx];
                 
                 // Only keep vertices where the height is significantly above the minimum (projection plane)
                 if (Math.abs(rawHeight - minHeight) > heightThreshold) {
@@ -1692,32 +1575,40 @@ class OffsetGeneratorApp {
             }
         }
         
-        this.logStatus(`Filtered ${validVertices.length} vertices, deleted ${deletedCount} planar vertices from ${resolution * resolution} total`, 'info');
+        this.logStatus(`Filtered ${validVertices.length} vertices, deleted ${deletedCount} planar vertices from ${workingResolution * workingResolution} total`, 'info');
         
-        // Step 2: Build vertex arrays
-        const positions = [];
+        // Step 2: Build vertex arrays (pre-allocate for memory efficiency)
+        const maxPositions = validVertices.length * 2 * 3; // top + bottom vertices * 3 coords
+        const positions = new Float32Array(maxPositions);
+        let posIdx = 0;
         
         // Add top surface vertices
         validVertices.forEach((v, idx) => {
-            v.topIndex = positions.length / 3;
-            positions.push(v.topPos.x, v.topPos.y, v.topPos.z);
+            v.topIndex = posIdx / 3;
+            positions[posIdx++] = v.topPos.x;
+            positions[posIdx++] = v.topPos.y;
+            positions[posIdx++] = v.topPos.z;
         });
         
         // Add bottom surface vertices
         validVertices.forEach((v, idx) => {
-            v.bottomIndex = positions.length / 3;
-            positions.push(v.bottomPos.x, v.bottomPos.y, v.bottomPos.z);
+            v.bottomIndex = posIdx / 3;
+            positions[posIdx++] = v.bottomPos.x;
+            positions[posIdx++] = v.bottomPos.y;
+            positions[posIdx++] = v.bottomPos.z;
         });
         
-        // Step 3: Build top surface triangles
-        const indices = [];
+        // Step 3: Build top surface triangles (pre-allocate indices array)
+        const maxTriangles = (workingResolution - 1) * (workingResolution - 1) * 4 * 3; // 4 surfaces (top, bottom, 2 walls) * 2 triangles * 3 indices
+        const indices = new Uint32Array(maxTriangles);
+        let idxCount = 0;
         
-        for (let j = 0; j < resolution - 1; j++) {
-            for (let i = 0; i < resolution - 1; i++) {
-                const a = vertexGrid[j * resolution + i];
-                const b = vertexGrid[j * resolution + (i + 1)];
-                const c = vertexGrid[(j + 1) * resolution + i];
-                const d = vertexGrid[(j + 1) * resolution + (i + 1)];
+        for (let j = 0; j < workingResolution - 1; j++) {
+            for (let i = 0; i < workingResolution - 1; i++) {
+                const a = vertexGrid[j * workingResolution + i];
+                const b = vertexGrid[j * workingResolution + (i + 1)];
+                const c = vertexGrid[(j + 1) * workingResolution + i];
+                const d = vertexGrid[(j + 1) * workingResolution + (i + 1)];
                 
                 // Only create triangles if all 4 vertices exist
                 if (a !== null && b !== null && c !== null && d !== null) {
@@ -1727,19 +1618,19 @@ class OffsetGeneratorApp {
                     const vd = validVertices[d].topIndex;
                     
                     // Top surface - outward facing (CCW from above)
-                    indices.push(va, vb, vd);
-                    indices.push(va, vd, vc);
+                    indices[idxCount++] = va; indices[idxCount++] = vb; indices[idxCount++] = vd;
+                    indices[idxCount++] = va; indices[idxCount++] = vd; indices[idxCount++] = vc;
                 }
             }
         }
         
         // Step 4: Build bottom surface triangles (reversed winding)
-        for (let j = 0; j < resolution - 1; j++) {
-            for (let i = 0; i < resolution - 1; i++) {
-                const a = vertexGrid[j * resolution + i];
-                const b = vertexGrid[j * resolution + (i + 1)];
-                const c = vertexGrid[(j + 1) * resolution + i];
-                const d = vertexGrid[(j + 1) * resolution + (i + 1)];
+        for (let j = 0; j < workingResolution - 1; j++) {
+            for (let i = 0; i < workingResolution - 1; i++) {
+                const a = vertexGrid[j * workingResolution + i];
+                const b = vertexGrid[j * workingResolution + (i + 1)];
+                const c = vertexGrid[(j + 1) * workingResolution + i];
+                const d = vertexGrid[(j + 1) * workingResolution + (i + 1)];
                 
                 if (a !== null && b !== null && c !== null && d !== null) {
                     const va = validVertices[a].bottomIndex;
@@ -1748,8 +1639,8 @@ class OffsetGeneratorApp {
                     const vd = validVertices[d].bottomIndex;
                     
                     // Bottom surface - inward facing (CW from above)
-                    indices.push(va, vd, vb);
-                    indices.push(va, vc, vd);
+                    indices[idxCount++] = va; indices[idxCount++] = vd; indices[idxCount++] = vb;
+                    indices[idxCount++] = va; indices[idxCount++] = vc; indices[idxCount++] = vd;
                 }
             }
         }
@@ -1759,20 +1650,20 @@ class OffsetGeneratorApp {
         
         const addWallQuad = (v1Top, v1Bottom, v2Top, v2Bottom) => {
             // Outward facing wall
-            indices.push(v1Top, v2Top, v2Bottom);
-            indices.push(v1Top, v2Bottom, v1Bottom);
+            indices[idxCount++] = v1Top; indices[idxCount++] = v2Top; indices[idxCount++] = v2Bottom;
+            indices[idxCount++] = v1Top; indices[idxCount++] = v2Bottom; indices[idxCount++] = v1Bottom;
         };
         
         // Horizontal edges (along i direction)
-        for (let j = 0; j < resolution; j++) {
-            for (let i = 0; i < resolution - 1; i++) {
-                const curr = vertexGrid[j * resolution + i];
-                const next = vertexGrid[j * resolution + (i + 1)];
+        for (let j = 0; j < workingResolution; j++) {
+            for (let i = 0; i < workingResolution - 1; i++) {
+                const curr = vertexGrid[j * workingResolution + i];
+                const next = vertexGrid[j * workingResolution + (i + 1)];
                 
                 if (curr !== null && next !== null) {
                     // Check if this edge is on a boundary
-                    const hasTopNeighbor = (j > 0) && vertexGrid[(j - 1) * resolution + i] !== null && vertexGrid[(j - 1) * resolution + (i + 1)] !== null;
-                    const hasBottomNeighbor = (j < resolution - 1) && vertexGrid[(j + 1) * resolution + i] !== null && vertexGrid[(j + 1) * resolution + (i + 1)] !== null;
+                    const hasTopNeighbor = (j > 0) && vertexGrid[(j - 1) * workingResolution + i] !== null && vertexGrid[(j - 1) * workingResolution + (i + 1)] !== null;
+                    const hasBottomNeighbor = (j < workingResolution - 1) && vertexGrid[(j + 1) * workingResolution + i] !== null && vertexGrid[(j + 1) * workingResolution + (i + 1)] !== null;
                     
                     // Add wall if on boundary or has missing neighbor (hole/concave)
                     if (j === 0 || !hasTopNeighbor) {
@@ -1785,7 +1676,7 @@ class OffsetGeneratorApp {
                         );
                     }
                     
-                    if (j === resolution - 1 || !hasBottomNeighbor) {
+                    if (j === workingResolution - 1 || !hasBottomNeighbor) {
                         // Back wall (reversed order for correct winding)
                         addWallQuad(
                             validVertices[next].topIndex,
@@ -1799,14 +1690,14 @@ class OffsetGeneratorApp {
         }
         
         // Vertical edges (along j direction)
-        for (let i = 0; i < resolution; i++) {
-            for (let j = 0; j < resolution - 1; j++) {
-                const curr = vertexGrid[j * resolution + i];
-                const next = vertexGrid[(j + 1) * resolution + i];
+        for (let i = 0; i < workingResolution; i++) {
+            for (let j = 0; j < workingResolution - 1; j++) {
+                const curr = vertexGrid[j * workingResolution + i];
+                const next = vertexGrid[(j + 1) * workingResolution + i];
                 
                 if (curr !== null && next !== null) {
-                    const hasLeftNeighbor = (i > 0) && vertexGrid[j * resolution + (i - 1)] !== null && vertexGrid[(j + 1) * resolution + (i - 1)] !== null;
-                    const hasRightNeighbor = (i < resolution - 1) && vertexGrid[j * resolution + (i + 1)] !== null && vertexGrid[(j + 1) * resolution + (i + 1)] !== null;
+                    const hasLeftNeighbor = (i > 0) && vertexGrid[j * workingResolution + (i - 1)] !== null && vertexGrid[(j + 1) * workingResolution + (i - 1)] !== null;
+                    const hasRightNeighbor = (i < workingResolution - 1) && vertexGrid[j * workingResolution + (i + 1)] !== null && vertexGrid[(j + 1) * workingResolution + (i + 1)] !== null;
                     
                     if (i === 0 || !hasLeftNeighbor) {
                         // Left wall (reversed order for correct winding)
@@ -1818,7 +1709,7 @@ class OffsetGeneratorApp {
                         );
                     }
                     
-                    if (i === resolution - 1 || !hasRightNeighbor) {
+                    if (i === workingResolution - 1 || !hasRightNeighbor) {
                         // Right wall
                         addWallQuad(
                             validVertices[curr].topIndex,
@@ -1831,10 +1722,12 @@ class OffsetGeneratorApp {
             }
         }
         
-        // Create geometry
+        // Create geometry with trimmed arrays (only actual used portion)
+        const finalIndices = new Uint32Array(indices.buffer, 0, idxCount);
+        
         const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
-        geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setIndex(new THREE.BufferAttribute(finalIndices, 1));
         geometry.computeVertexNormals();
         
         const endTime = performance.now();
@@ -1847,6 +1740,841 @@ class OffsetGeneratorApp {
         );
         
         return geometry;
+    }
+    
+    downsampleHeightmap(heightMap, resolution, factor) {
+        const startTime = performance.now();
+        
+        // Edge-focused adaptive downsampling for high-quality side walls
+        // Strategy:
+        // 1. Detect boundary/edge regions (future side walls)
+        // 2. Apply high-quality supersampling to edge regions
+        // 3. Use fast interpolation for interior/flat regions
+        // 4. Minimal post-processing (edges already clean)
+        
+        const newResolution = Math.floor(resolution / factor);
+        const newHeightMap = new Float32Array(newResolution * newResolution);
+        
+        // Pass 1: Detect edges and boundaries (these become side walls)
+        this.logStatus('Pass 1: Detecting edge/boundary regions...', 'info');
+        const edgeMap = this.detectBoundaryEdges(heightMap, resolution);
+        const edgeThreshold = this.calculateEdgeThreshold(heightMap, resolution);
+        
+        // Pass 2: Edge-targeted adaptive sampling
+        this.logStatus('Pass 2: Edge-focused supersampled resampling...', 'info');
+        for (let j = 0; j < newResolution; j++) {
+            for (let i = 0; i < newResolution; i++) {
+                const srcJ = j * factor;
+                const srcI = i * factor;
+                
+                // Check if this block contains or is near an edge
+                let isNearEdge = false;
+                let maxEdgeStrength = 0;
+                
+                // Sample edge map in wider neighborhood (edges need context)
+                const edgeCheckRadius = Math.ceil(factor * 3.5); // Maximum coverage - 3.5x factor
+                const blockCenterI = Math.floor(srcI + factor / 2);
+                const blockCenterJ = Math.floor(srcJ + factor / 2);
+                
+                for (let dj = -edgeCheckRadius; dj <= edgeCheckRadius; dj++) {
+                    for (let di = -edgeCheckRadius; di <= edgeCheckRadius; di++) {
+                        const sampleJ = Math.min(resolution - 1, Math.max(0, blockCenterJ + dj));
+                        const sampleI = Math.min(resolution - 1, Math.max(0, blockCenterI + di));
+                        const edgeStrength = edgeMap[sampleJ * resolution + sampleI];
+                        
+                        if (edgeStrength > 0.08) { // Ultra-sensitive detection
+                            isNearEdge = true;
+                        }
+                        maxEdgeStrength = Math.max(maxEdgeStrength, edgeStrength);
+                    }
+                }
+                
+                let sampledValue;
+                
+                if (isNearEdge && maxEdgeStrength > 0.15) { // Maximum 10x10 coverage
+                    // EDGE REGION: Apply ultra-high-quality 10x10 supersampling for pristine walls
+                    // This is critical for side wall quality - no compromises here
+                    sampledValue = this.supersampleEdgeRegion(heightMap, resolution, srcI, srcJ, factor, edgeMap);
+                } else if (maxEdgeStrength > 0.08) { // Widest possible Lanczos coverage
+                    // NEAR EDGE: Use Lanczos for smooth transition zones
+                    sampledValue = this.sampleLanczos2(heightMap, resolution, srcI + factor/2, srcJ + factor/2, factor);
+                } else if (maxEdgeStrength > 0.03) { // Maximum bicubic coverage
+                    // MEDIUM DETAIL: Bicubic interpolation
+                    sampledValue = this.sampleBicubic(heightMap, resolution, srcI + factor/2, srcJ + factor/2);
+                } else {
+                    // FLAT INTERIOR: Fast bilinear interpolation
+                    sampledValue = this.bilinearInterpolate(heightMap, resolution, srcI + factor/2, srcJ + factor/2);
+                }
+                
+                newHeightMap[j * newResolution + i] = sampledValue;
+            }
+        }
+        
+        // Pass 3: REMOVED - No post-processing smoothing to preserve pristine edge quality
+        // The 10x10 supersampling already provides exceptional quality without any filtering
+        
+        const endTime = performance.now();
+        this.logStatus(`Edge-focused downsampling complete: ${(endTime - startTime).toFixed(0)}ms`, 'success');
+        
+        return {
+            heightMap: newHeightMap,
+            resolution: newResolution
+        };
+    }
+    
+    detectBoundaryEdges(heightMap, resolution) {
+        // Enhanced multi-scale boundary and edge detection
+        // Detects regions that will become side walls with high precision
+        
+        const edgeMap = new Float32Array(resolution * resolution);
+        
+        // Find minimum height (projection plane)
+        let minHeight = Infinity;
+        for (let i = 0; i < heightMap.length; i++) {
+            minHeight = Math.min(minHeight, heightMap[i]);
+        }
+        
+        const heightThreshold = 0.001; // Same as mesh creation threshold
+        
+        // Multi-scale Sobel kernels for robust edge detection
+        const sobelX = [-1, 0, 1, -2, 0, 2, -1, 0, 1];
+        const sobelY = [-1, -2, -1, 0, 0, 0, 1, 2, 1];
+        
+        // Scharr operator (more accurate for diagonal edges)
+        const scharrX = [-3, 0, 3, -10, 0, 10, -3, 0, 3];
+        const scharrY = [-3, -10, -3, 0, 0, 0, 3, 10, 3];
+        
+        let maxEdgeStrength = 0;
+        
+        for (let j = 1; j < resolution - 1; j++) {
+            for (let i = 1; i < resolution - 1; i++) {
+                const idx = j * resolution + i;
+                const centerHeight = heightMap[idx];
+                
+                // Check if this pixel is part of the mesh (not on projection plane)
+                const isActive = Math.abs(centerHeight - minHeight) > heightThreshold;
+                
+                if (!isActive) {
+                    edgeMap[idx] = 0;
+                    continue;
+                }
+                
+                // Multi-scale gradient computation (Sobel + Scharr)
+                let gxSobel = 0, gySobel = 0, gxScharr = 0, gyScharr = 0;
+                for (let kj = -1; kj <= 1; kj++) {
+                    for (let ki = -1; ki <= 1; ki++) {
+                        const nidx = (j + kj) * resolution + (i + ki);
+                        const kernelIdx = (kj + 1) * 3 + (ki + 1);
+                        gxSobel += heightMap[nidx] * sobelX[kernelIdx];
+                        gySobel += heightMap[nidx] * sobelY[kernelIdx];
+                        gxScharr += heightMap[nidx] * scharrX[kernelIdx];
+                        gyScharr += heightMap[nidx] * scharrY[kernelIdx];
+                    }
+                }
+                const gradientSobel = Math.sqrt(gxSobel * gxSobel + gySobel * gySobel);
+                const gradientScharr = Math.sqrt(gxScharr * gxScharr + gyScharr * gyScharr);
+                // Use maximum of both for robust detection
+                const gradient = Math.max(gradientSobel, gradientScharr * 0.5);
+                
+                // Check for boundary transitions (active neighbor to inactive)
+                let boundaryScore = 0;
+                let activeNeighbors = 0;
+                for (let kj = -1; kj <= 1; kj++) {
+                    for (let ki = -1; ki <= 1; ki++) {
+                        if (ki === 0 && kj === 0) continue;
+                        const nidx = (j + kj) * resolution + (i + ki);
+                        const neighborHeight = heightMap[nidx];
+                        const neighborActive = Math.abs(neighborHeight - minHeight) > heightThreshold;
+                        
+                        if (neighborActive) {
+                            activeNeighbors++;
+                        }
+                    }
+                }
+                
+                // Boundary detection: fewer active neighbors = closer to edge
+                // 8 neighbors total, if less than 7 active, it's near boundary
+                if (activeNeighbors < 7) {
+                    boundaryScore = 1.0 - (activeNeighbors / 8.0);
+                }
+                
+                // Combine gradient and boundary score
+                // High gradient OR boundary = edge that needs high-quality sampling
+                const edgeStrength = Math.max(boundaryScore, gradient / (gradient + 1.0));
+                edgeMap[idx] = edgeStrength;
+                maxEdgeStrength = Math.max(maxEdgeStrength, edgeStrength);
+            }
+        }
+        
+        // Normalize edge strengths
+        if (maxEdgeStrength > 0) {
+            for (let i = 0; i < edgeMap.length; i++) {
+                edgeMap[i] /= maxEdgeStrength;
+            }
+        }
+        
+        // Dilate edges to ensure we catch nearby regions
+        // This ensures smooth transitions and catches edge influence zones
+        const dilatedEdgeMap = new Float32Array(resolution * resolution);
+        dilatedEdgeMap.set(edgeMap);
+        
+        const dilationRadius = 4; // Maximum edge expansion - 4 pixels for widest high-quality zones
+        for (let j = dilationRadius; j < resolution - dilationRadius; j++) {
+            for (let i = dilationRadius; i < resolution - dilationRadius; i++) {
+                const idx = j * resolution + i;
+                let maxNeighborEdge = edgeMap[idx];
+                
+                // Check neighborhood for strong edges
+                for (let dj = -dilationRadius; dj <= dilationRadius; dj++) {
+                    for (let di = -dilationRadius; di <= dilationRadius; di++) {
+                        const nidx = (j + dj) * resolution + (i + di);
+                        const dist = Math.sqrt(di * di + dj * dj);
+                        // Distance-weighted dilation
+                        const weight = 1.0 - (dist / (dilationRadius + 1));
+                        maxNeighborEdge = Math.max(maxNeighborEdge, edgeMap[nidx] * weight);
+                    }
+                }
+                
+                dilatedEdgeMap[idx] = maxNeighborEdge;
+            }
+        }
+        
+        return dilatedEdgeMap;
+    }
+    
+    supersampleEdgeRegion(heightMap, resolution, srcI, srcJ, factor, edgeMap) {
+        // Ultra-high-quality supersampling specifically for edge/boundary regions
+        // Uses 10x10 supersampling with edge-aware filtering for exceptional smoothness
+        
+        const supersampleFactor = 10; // 10x10 = 100 samples per pixel for absolutely pristine edges
+        const samples = [];
+        const weights = [];
+        
+        // Detect primary edge direction in this block
+        let avgGradX = 0, avgGradY = 0;
+        let gradCount = 0;
+        
+        for (let dj = 0; dj < factor; dj++) {
+            for (let di = 0; di < factor; di++) {
+                const sj = Math.min(resolution - 1, Math.max(0, srcJ + dj));
+                const si = Math.min(resolution - 1, Math.max(0, srcI + di));
+                
+                if (si > 0 && si < resolution - 1 && sj > 0 && sj < resolution - 1) {
+                    const idx = sj * resolution + si;
+                    const gx = (heightMap[idx + 1] - heightMap[idx - 1]) / 2;
+                    const gy = (heightMap[idx + resolution] - heightMap[idx - resolution]) / 2;
+                    avgGradX += gx;
+                    avgGradY += gy;
+                    gradCount++;
+                }
+            }
+        }
+        
+        if (gradCount > 0) {
+            avgGradX /= gradCount;
+            avgGradY /= gradCount;
+        }
+        
+        const gradMag = Math.sqrt(avgGradX * avgGradX + avgGradY * avgGradY);
+        let edgeNormalX = 0, edgeNormalY = 0;
+        
+        if (gradMag > 1e-6) {
+            // Edge normal (perpendicular to gradient direction)
+            edgeNormalX = -avgGradY / gradMag;
+            edgeNormalY = avgGradX / gradMag;
+        }
+        
+        // Supersample with rotated grid aligned to edge
+        for (let dj = 0; dj < factor; dj++) {
+            for (let di = 0; di < factor; di++) {
+                for (let ssj = 0; ssj < supersampleFactor; ssj++) {
+                    for (let ssi = 0; ssi < supersampleFactor; ssi++) {
+                        // Sub-pixel offset
+                        const subI = (ssi + 0.5) / supersampleFactor;
+                        const subJ = (ssj + 0.5) / supersampleFactor;
+                        
+                        // Position in source space
+                        const posI = srcI + di + subI;
+                        const posJ = srcJ + dj + subJ;
+                        
+                        // High-quality interpolation at this point
+                        const value = this.bilinearInterpolate(heightMap, resolution, posI, posJ);
+                        samples.push(value);
+                        
+                        // Edge-aligned weighting
+                        const centerI = srcI + factor / 2;
+                        const centerJ = srcJ + factor / 2;
+                        const dx = posI - centerI;
+                        const dy = posJ - centerJ;
+                        
+                        // Distance weight
+                        const distSq = dx * dx + dy * dy;
+                        const sigma = factor / 2;
+                        let weight = Math.exp(-distSq / (2 * sigma * sigma));
+                        
+                        // Edge alignment boost (prefer samples along edge)
+                        if (gradMag > 0.01) {
+                            const normalAlign = Math.abs(dx * edgeNormalX + dy * edgeNormalY);
+                            const tangentAlign = Math.abs(dx * avgGradX / gradMag + dy * avgGradY / gradMag);
+                            
+                            // Boost weight for samples aligned with edge direction
+                            const alignmentBoost = 1.0 + normalAlign * 0.5 - tangentAlign * 0.3;
+                            weight *= Math.max(0.3, alignmentBoost);
+                        }
+                        
+                        weights.push(weight);
+                    }
+                }
+            }
+        }
+        
+        // Weighted average with outlier filtering
+        if (samples.length === 0) {
+            return heightMap[Math.min(resolution - 1, Math.floor(srcJ + factor/2)) * resolution + 
+                            Math.min(resolution - 1, Math.floor(srcI + factor/2))];
+        }
+        
+        // Compute weighted mean
+        let sum = 0, totalWeight = 0;
+        for (let i = 0; i < samples.length; i++) {
+            sum += samples[i] * weights[i];
+            totalWeight += weights[i];
+        }
+        const mean = sum / totalWeight;
+        
+        // Compute weighted standard deviation
+        let variance = 0;
+        for (let i = 0; i < samples.length; i++) {
+            const diff = samples[i] - mean;
+            variance += diff * diff * weights[i];
+        }
+        variance /= totalWeight;
+        const stdDev = Math.sqrt(variance);
+        
+        // Remove outliers and recompute (robust to noise)
+        sum = 0;
+        totalWeight = 0;
+        for (let i = 0; i < samples.length; i++) {
+            if (Math.abs(samples[i] - mean) < 2.5 * stdDev) {
+                sum += samples[i] * weights[i];
+                totalWeight += weights[i];
+            }
+        }
+        
+        return totalWeight > 0 ? sum / totalWeight : mean;
+    }
+    
+    computeImportanceMap(heightMap, resolution) {
+        // Legacy function - replaced by detectBoundaryEdges
+        // Kept for potential future use
+        console.warn('computeImportanceMap deprecated, using detectBoundaryEdges instead');
+        return this.detectBoundaryEdges(heightMap, resolution);
+    }
+    
+    computeGradientMap(heightMap, resolution) {
+        // Compute gradient magnitude at each pixel using Sobel operator
+        const gradientMap = new Float32Array(resolution * resolution);
+        
+        // Sobel kernels
+        const sobelX = [-1, 0, 1, -2, 0, 2, -1, 0, 1];
+        const sobelY = [-1, -2, -1, 0, 0, 0, 1, 2, 1];
+        
+        for (let j = 1; j < resolution - 1; j++) {
+            for (let i = 1; i < resolution - 1; i++) {
+                let gx = 0, gy = 0;
+                
+                // Apply Sobel kernels
+                for (let kj = -1; kj <= 1; kj++) {
+                    for (let ki = -1; ki <= 1; ki++) {
+                        const idx = (j + kj) * resolution + (i + ki);
+                        const kernelIdx = (kj + 1) * 3 + (ki + 1);
+                        gx += heightMap[idx] * sobelX[kernelIdx];
+                        gy += heightMap[idx] * sobelY[kernelIdx];
+                    }
+                }
+                
+                // Gradient magnitude
+                gradientMap[j * resolution + i] = Math.sqrt(gx * gx + gy * gy);
+            }
+        }
+        
+        return gradientMap;
+    }
+    
+    classifyDetailRegions(gradientMap, resolution, edgeThreshold) {
+        // Classify each pixel by detail level (0 = flat, 1 = high detail)
+        const detailMap = new Float32Array(resolution * resolution);
+        
+        // Find gradient statistics for normalization
+        let maxGradient = 0;
+        for (let i = 0; i < gradientMap.length; i++) {
+            maxGradient = Math.max(maxGradient, gradientMap[i]);
+        }
+        
+        // Normalize and classify
+        const gradientThreshold = Math.sqrt(edgeThreshold);
+        for (let i = 0; i < resolution * resolution; i++) {
+            const normalizedGradient = gradientMap[i] / (maxGradient + 1e-6);
+            
+            // Smooth classification with sigmoid-like curve
+            const x = normalizedGradient / gradientThreshold;
+            detailMap[i] = Math.min(1, x * x); // Quadratic ramp for smooth transition
+        }
+        
+        return detailMap;
+    }
+    
+    sampleHighDetail(heightMap, resolution, srcI, srcJ, factor, gradientMap) {
+        // High-detail sampling: use gradient-weighted median filter
+        // This preserves edges while reducing noise
+        
+        const samples = [];
+        const weights = [];
+        
+        for (let dj = 0; dj < factor; dj++) {
+            for (let di = 0; di < factor; di++) {
+                const sj = Math.min(resolution - 1, srcJ + dj);
+                const si = Math.min(resolution - 1, srcI + di);
+                const idx = sj * resolution + si;
+                
+                samples.push(heightMap[idx]);
+                
+                // Weight by inverse gradient: lower gradient = more influence
+                // This helps preserve sharp edges
+                const gradient = gradientMap[idx];
+                const weight = 1 / (1 + gradient);
+                weights.push(weight);
+            }
+        }
+        
+        // Weighted percentile (closer to median for robust edge preservation)
+        const sortedIndices = samples.map((_, i) => i)
+            .sort((a, b) => samples[a] - samples[b]);
+        
+        let cumulativeWeight = 0;
+        const totalWeight = weights.reduce((a, b) => a + b, 0);
+        const targetWeight = totalWeight * 0.5; // Median
+        
+        for (let i = 0; i < sortedIndices.length; i++) {
+            cumulativeWeight += weights[sortedIndices[i]];
+            if (cumulativeWeight >= targetWeight) {
+                return samples[sortedIndices[i]];
+            }
+        }
+        
+        return samples[sortedIndices[Math.floor(sortedIndices.length / 2)]];
+    }
+    
+    sampleHighDetailAntialiased(heightMap, resolution, srcI, srcJ, factor, gradientMap) {
+        // Enhanced anti-aliased sampling with proper Lanczos-style filtering
+        // Uses higher supersampling rate and better interpolation
+        
+        // Collect samples with their gradients
+        const blockSamples = [];
+        let avgGradX = 0, avgGradY = 0;
+        let sampleCount = 0;
+        
+        // First pass: analyze the block to detect edge orientation
+        for (let dj = -1; dj <= factor; dj++) {
+            for (let di = -1; di <= factor; di++) {
+                const sj = Math.min(resolution - 1, Math.max(0, srcJ + dj));
+                const si = Math.min(resolution - 1, Math.max(0, srcI + di));
+                const idx = sj * resolution + si;
+                
+                blockSamples.push({ value: heightMap[idx], i: si, j: sj });
+                
+                // Compute gradient using central differences
+                if (si > 0 && si < resolution - 1 && sj > 0 && sj < resolution - 1) {
+                    const gx = (heightMap[idx + 1] - heightMap[idx - 1]) / 2;
+                    const gy = (heightMap[idx + resolution] - heightMap[idx - resolution]) / 2;
+                    avgGradX += gx;
+                    avgGradY += gy;
+                    sampleCount++;
+                }
+            }
+        }
+        
+        // Average gradient direction for the block
+        if (sampleCount > 0) {
+            avgGradX /= sampleCount;
+            avgGradY /= sampleCount;
+        }
+        
+        // Normalize to get edge tangent (perpendicular to gradient)
+        const gradMag = Math.sqrt(avgGradX * avgGradX + avgGradY * avgGradY);
+        let edgeTangentX = 0, edgeTangentY = 0;
+        
+        if (gradMag > 1e-6) {
+            // Edge tangent is perpendicular to gradient
+            edgeTangentX = -avgGradY / gradMag;
+            edgeTangentY = avgGradX / gradMag;
+        }
+        
+        // Second pass: Supersampled reconstruction with Lanczos-2 kernel
+        // Use 4x4 supersampling for better quality
+        const supersampleRes = 4;
+        const samples = [];
+        const weights = [];
+        
+        for (let dj = 0; dj < factor; dj++) {
+            for (let di = 0; di < factor; di++) {
+                // Multiple subsamples per pixel
+                for (let ssj = 0; ssj < supersampleRes; ssj++) {
+                    for (let ssi = 0; ssi < supersampleRes; ssi++) {
+                        // Sub-pixel position (0 to 1 within pixel)
+                        const subI = (ssi + 0.5) / supersampleRes;
+                        const subJ = (ssj + 0.5) / supersampleRes;
+                        
+                        // Continuous position in source space
+                        const contI = srcI + di + subI;
+                        const contJ = srcJ + dj + subJ;
+                        
+                        // Bilinear interpolation with edge-aware adjustment
+                        const value = this.bilinearInterpolate(heightMap, resolution, contI, contJ);
+                        samples.push(value);
+                        
+                        // Compute weight based on distance and edge alignment
+                        const centerI = srcI + factor / 2;
+                        const centerJ = srcJ + factor / 2;
+                        const dx = contI - centerI;
+                        const dy = contJ - centerJ;
+                        
+                        // Distance weight (Gaussian)
+                        const distSq = dx * dx + dy * dy;
+                        const sigma = factor / 2;
+                        let weight = Math.exp(-distSq / (2 * sigma * sigma));
+                        
+                        // Edge alignment weight (prefer samples aligned with edge)
+                        if (gradMag > 0.01) {
+                            // Project displacement onto edge tangent
+                            const tangentAlign = Math.abs(dx * edgeTangentX + dy * edgeTangentY);
+                            const normalAlign = Math.abs(dx * avgGradX / gradMag + dy * avgGradY / gradMag);
+                            
+                            // Prefer samples along edge direction, less across edge
+                            const alignmentFactor = 1 + tangentAlign - normalAlign * 0.5;
+                            weight *= Math.max(0.1, alignmentFactor);
+                        }
+                        
+                        weights.push(weight);
+                    }
+                }
+            }
+        }
+        
+        // Weighted average with outlier rejection
+        if (samples.length === 0) {
+            return heightMap[Math.min(resolution - 1, Math.floor(srcJ + factor/2)) * resolution + 
+                            Math.min(resolution - 1, Math.floor(srcI + factor/2))];
+        }
+        
+        // Calculate weighted mean and standard deviation
+        let weightedSum = 0;
+        let totalWeight = 0;
+        for (let i = 0; i < samples.length; i++) {
+            weightedSum += samples[i] * weights[i];
+            totalWeight += weights[i];
+        }
+        const mean = weightedSum / totalWeight;
+        
+        let variance = 0;
+        for (let i = 0; i < samples.length; i++) {
+            const diff = samples[i] - mean;
+            variance += diff * diff * weights[i];
+        }
+        variance /= totalWeight;
+        const stdDev = Math.sqrt(variance);
+        
+        // Remove outliers (> 2 std dev) and recalculate
+        weightedSum = 0;
+        totalWeight = 0;
+        for (let i = 0; i < samples.length; i++) {
+            if (Math.abs(samples[i] - mean) < 2 * stdDev) {
+                weightedSum += samples[i] * weights[i];
+                totalWeight += weights[i];
+            }
+        }
+        
+        return totalWeight > 0 ? weightedSum / totalWeight : mean;
+    }
+    
+    sampleLanczos2(heightMap, resolution, x, y, windowSize) {
+        // Lanczos-2 windowed sinc interpolation - highest quality resampling
+        const lanczos = (x, a = 2) => {
+            if (Math.abs(x) < 1e-6) return 1;
+            if (Math.abs(x) >= a) return 0;
+            const px = Math.PI * x;
+            return (a * Math.sin(px) * Math.sin(px / a)) / (px * px);
+        };
+        
+        const radius = 2;
+        let sum = 0;
+        let weightSum = 0;
+        
+        const x0 = Math.floor(x);
+        const y0 = Math.floor(y);
+        
+        for (let dy = -radius + 1; dy <= radius; dy++) {
+            for (let dx = -radius + 1; dx <= radius; dx++) {
+                const sx = x0 + dx;
+                const sy = y0 + dy;
+                
+                if (sx < 0 || sx >= resolution || sy < 0 || sy >= resolution) continue;
+                
+                const distX = x - sx;
+                const distY = y - sy;
+                const weight = lanczos(distX) * lanczos(distY);
+                
+                sum += heightMap[sy * resolution + sx] * weight;
+                weightSum += weight;
+            }
+        }
+        
+        return weightSum > 0 ? sum / weightSum : heightMap[Math.floor(y) * resolution + Math.floor(x)];
+    }
+    
+    sampleBicubic(heightMap, resolution, x, y) {
+        // Catmull-Rom bicubic interpolation
+        const cubic = (t, p0, p1, p2, p3) => {
+            return 0.5 * (
+                (2 * p1) +
+                (-p0 + p2) * t +
+                (2*p0 - 5*p1 + 4*p2 - p3) * t * t +
+                (-p0 + 3*p1 - 3*p2 + p3) * t * t * t
+            );
+        };
+        
+        const x0 = Math.floor(x);
+        const y0 = Math.floor(y);
+        const fx = x - x0;
+        const fy = y - y0;
+        
+        const samples = new Array(4);
+        for (let j = 0; j < 4; j++) {
+            const sy = Math.max(0, Math.min(resolution - 1, y0 - 1 + j));
+            const row = [];
+            for (let i = 0; i < 4; i++) {
+                const sx = Math.max(0, Math.min(resolution - 1, x0 - 1 + i));
+                row.push(heightMap[sy * resolution + sx]);
+            }
+            samples[j] = cubic(fx, row[0], row[1], row[2], row[3]);
+        }
+        
+        return cubic(fy, samples[0], samples[1], samples[2], samples[3]);
+    }
+    
+    selectiveSmooth(heightMap, resolution, edgeThreshold) {
+        // Selective smoothing - only smooth high-frequency noise
+        const needsSmoothing = new Uint8Array(resolution * resolution);
+        
+        for (let j = 1; j < resolution - 1; j++) {
+            for (let i = 1; i < resolution - 1; i++) {
+                const idx = j * resolution + i;
+                const center = heightMap[idx];
+                
+                let variation = 0;
+                let count = 0;
+                for (let dj = -1; dj <= 1; dj++) {
+                    for (let di = -1; di <= 1; di++) {
+                        if (di === 0 && dj === 0) continue;
+                        const neighbor = heightMap[(j + dj) * resolution + (i + di)];
+                        variation += Math.abs(neighbor - center);
+                        count++;
+                    }
+                }
+                variation /= count;
+                
+                const gx = heightMap[idx + 1] - heightMap[idx - 1];
+                const gy = heightMap[idx + resolution] - heightMap[idx - resolution];
+                const gradStrength = Math.sqrt(gx * gx + gy * gy);
+                
+                if (variation > edgeThreshold * 0.5 && gradStrength < edgeThreshold) {
+                    needsSmoothing[idx] = 1;
+                }
+            }
+        }
+        
+        const smoothed = new Float32Array(heightMap.length);
+        smoothed.set(heightMap);
+        
+        for (let j = 1; j < resolution - 1; j++) {
+            for (let i = 1; i < resolution - 1; i++) {
+                const idx = j * resolution + i;
+                
+                if (needsSmoothing[idx]) {
+                    let sum = 0;
+                    const weights = [1, 2, 1, 2, 4, 2, 1, 2, 1];
+                    let weightSum = 0;
+                    let wi = 0;
+                    
+                    for (let dj = -1; dj <= 1; dj++) {
+                        for (let di = -1; di <= 1; di++) {
+                            const nidx = (j + dj) * resolution + (i + di);
+                            sum += heightMap[nidx] * weights[wi];
+                            weightSum += weights[wi];
+                            wi++;
+                        }
+                    }
+                    
+                    smoothed[idx] = sum / weightSum;
+                }
+            }
+        }
+        
+        heightMap.set(smoothed);
+    }
+    
+    bilinearInterpolate(heightMap, resolution, x, y) {
+        // Bilinear interpolation at fractional coordinates
+        const x0 = Math.floor(x);
+        const y0 = Math.floor(y);
+        const x1 = Math.min(resolution - 1, x0 + 1);
+        const y1 = Math.min(resolution - 1, y0 + 1);
+        
+        // Clamp to valid range
+        const cx0 = Math.max(0, Math.min(resolution - 1, x0));
+        const cy0 = Math.max(0, Math.min(resolution - 1, y0));
+        const cx1 = Math.max(0, Math.min(resolution - 1, x1));
+        const cy1 = Math.max(0, Math.min(resolution - 1, y1));
+        
+        // Fractional parts
+        const fx = x - x0;
+        const fy = y - y0;
+        
+        // Sample four corners
+        const v00 = heightMap[cy0 * resolution + cx0];
+        const v10 = heightMap[cy0 * resolution + cx1];
+        const v01 = heightMap[cy1 * resolution + cx0];
+        const v11 = heightMap[cy1 * resolution + cx1];
+        
+        // Bilinear interpolation
+        const v0 = v00 * (1 - fx) + v10 * fx;
+        const v1 = v01 * (1 - fx) + v11 * fx;
+        return v0 * (1 - fy) + v1 * fy;
+    }
+    
+    sampleLowDetail(heightMap, resolution, srcI, srcJ, factor) {
+        // Low-detail sampling: use Gaussian-weighted average for smooth interpolation
+        
+        let weightedSum = 0;
+        let weightSum = 0;
+        const centerI = srcI + factor / 2;
+        const centerJ = srcJ + factor / 2;
+        const sigma = factor / 3; // Gaussian falloff
+        
+        for (let dj = 0; dj < factor; dj++) {
+            for (let di = 0; di < factor; di++) {
+                const sj = Math.min(resolution - 1, srcJ + dj);
+                const si = Math.min(resolution - 1, srcI + di);
+                
+                // Gaussian weight based on distance from block center
+                const distI = si - centerI;
+                const distJ = sj - centerJ;
+                const distSq = distI * distI + distJ * distJ;
+                const weight = Math.exp(-distSq / (2 * sigma * sigma));
+                
+                weightedSum += heightMap[sj * resolution + si] * weight;
+                weightSum += weight;
+            }
+        }
+        
+        return weightSum > 0 ? weightedSum / weightSum : 0;
+    }
+    
+    adaptiveBilateralSmooth(heightMap, resolution, edgeThreshold) {
+        // Adaptive bilateral filter: stronger smoothing in flat regions, minimal at edges
+        const smoothed = new Float32Array(heightMap.length);
+        const spatialSigma = 1.5;
+        const rangeSigma = Math.sqrt(edgeThreshold) * 2;
+        
+        // Compute local gradients for adaptive kernel sizing
+        const localGradients = new Float32Array(resolution * resolution);
+        for (let j = 1; j < resolution - 1; j++) {
+            for (let i = 1; i < resolution - 1; i++) {
+                const idx = j * resolution + i;
+                const center = heightMap[idx];
+                
+                // Compute local gradient magnitude
+                const dx = heightMap[idx + 1] - heightMap[idx - 1];
+                const dy = heightMap[idx + resolution] - heightMap[idx - resolution];
+                localGradients[idx] = Math.sqrt(dx * dx + dy * dy);
+            }
+        }
+        
+        for (let j = 0; j < resolution; j++) {
+            for (let i = 0; i < resolution; i++) {
+                const idx = j * resolution + i;
+                const center = heightMap[idx];
+                const localGrad = localGradients[idx];
+                
+                // Adaptive kernel radius: smaller for edges, larger for flat regions
+                const normalizedGrad = localGrad / (Math.sqrt(edgeThreshold) + 1e-6);
+                const kernelRadius = Math.max(1, Math.floor(3 * (1 - Math.min(1, normalizedGrad))));
+                
+                let weightedSum = 0;
+                let weightSum = 0;
+                
+                for (let dj = -kernelRadius; dj <= kernelRadius; dj++) {
+                    for (let di = -kernelRadius; di <= kernelRadius; di++) {
+                        const nj = j + dj;
+                        const ni = i + di;
+                        
+                        if (nj >= 0 && nj < resolution && ni >= 0 && ni < resolution) {
+                            const neighborValue = heightMap[nj * resolution + ni];
+                            
+                            // Spatial weight
+                            const spatialDist = Math.sqrt(di * di + dj * dj);
+                            const spatialWeight = Math.exp(-(spatialDist * spatialDist) / (2 * spatialSigma * spatialSigma));
+                            
+                            // Range weight (intensity-based)
+                            const rangeDist = Math.abs(neighborValue - center);
+                            const rangeWeight = Math.exp(-(rangeDist * rangeDist) / (2 * rangeSigma * rangeSigma));
+                            
+                            const weight = spatialWeight * rangeWeight;
+                            weightedSum += neighborValue * weight;
+                            weightSum += weight;
+                        }
+                    }
+                }
+                
+                smoothed[idx] = weightSum > 0 ? weightedSum / weightSum : center;
+            }
+        }
+        
+        heightMap.set(smoothed);
+    }
+    
+    calculateEdgeThreshold(heightMap, resolution) {
+        // Calculate a reasonable edge detection threshold based on the heightmap's overall variance
+        let sum = 0;
+        let sumSq = 0;
+        const sampleSize = Math.min(10000, heightMap.length);
+        const step = Math.floor(heightMap.length / sampleSize);
+        
+        for (let i = 0; i < heightMap.length; i += step) {
+            const val = heightMap[i];
+            sum += val;
+            sumSq += val * val;
+        }
+        
+        const count = Math.ceil(heightMap.length / step);
+        const mean = sum / count;
+        const variance = (sumSq / count) - (mean * mean);
+        
+        // Use 10% of the global variance as edge threshold
+        // This adapts to the specific heightmap's characteristics
+        return variance * 0.1;
+    }
+    
+    smoothFlatRegions(heightMap, resolution, edgeThreshold) {
+        // Legacy function - replaced by adaptiveBilateralSmooth
+        // Kept for compatibility but not used in new multi-pass approach
+        console.warn('smoothFlatRegions is deprecated, use adaptiveBilateralSmooth instead');
+    }
+    
+    bilateralSmooth(heightMap, resolution, edgeThreshold) {
+        // Legacy function - replaced by adaptiveBilateralSmooth  
+        // Kept for compatibility but not used in new multi-pass approach
+        console.warn('bilateralSmooth is deprecated, use adaptiveBilateralSmooth instead');
     }
     
     async createHeightmapContourLines(result, heightmapData, offsetDistance, clipZMin, clipZMax) {
@@ -1954,220 +2682,9 @@ class OffsetGeneratorApp {
         this.logStatus(`✓ ${lines.length} contour lines created`, 'success');
     }
     
-    optimizeMeshGeometry(geometry, resolution) {
-        const startTime = performance.now();
-        const positionAttr = geometry.getAttribute('position');
-        const indexAttr = geometry.index;
-        
-        if (!positionAttr || !indexAttr) return;
-        
-        const positions = positionAttr.array;
-        const indices = indexAttr.array;
-        const vertexCount = positions.length / 3;
-        
-        // Step 1: Merge duplicate/near-duplicate vertices
-        const mergeThreshold = 0.0001;
-        const vertexMap = new Map();
-        const newPositions = [];
-        const vertexRemap = new Uint32Array(vertexCount);
-        let newVertexCount = 0;
-        
-        for (let i = 0; i < vertexCount; i++) {
-            const x = positions[i * 3];
-            const y = positions[i * 3 + 1];
-            const z = positions[i * 3 + 2];
-            
-            // Create a key for spatial hashing
-            const key = `${Math.round(x / mergeThreshold)},${Math.round(y / mergeThreshold)},${Math.round(z / mergeThreshold)}`;
-            
-            if (vertexMap.has(key)) {
-                // Check if actually close enough
-                const existingIdx = vertexMap.get(key);
-                const ex = newPositions[existingIdx * 3];
-                const ey = newPositions[existingIdx * 3 + 1];
-                const ez = newPositions[existingIdx * 3 + 2];
-                
-                const dx = x - ex;
-                const dy = y - ey;
-                const dz = z - ez;
-                const distSq = dx * dx + dy * dy + dz * dz;
-                
-                if (distSq < mergeThreshold * mergeThreshold) {
-                    vertexRemap[i] = existingIdx;
-                    continue;
-                }
-            }
-            
-            vertexMap.set(key, newVertexCount);
-            vertexRemap[i] = newVertexCount;
-            newPositions.push(x, y, z);
-            newVertexCount++;
-        }
-        
-        // Step 2: Remove degenerate triangles and remap indices
-        const newIndices = [];
-        for (let i = 0; i < indices.length; i += 3) {
-            const a = vertexRemap[indices[i]];
-            const b = vertexRemap[indices[i + 1]];
-            const c = vertexRemap[indices[i + 2]];
-            
-            // Skip degenerate triangles (where two or more vertices are the same)
-            if (a !== b && b !== c && a !== c) {
-                newIndices.push(a, b, c);
-            }
-        }
-        
-        // Step 3: Optimize triangle order for better cache coherency
-        // Sort triangles by vertex indices for better GPU cache utilization
-        const triangles = [];
-        for (let i = 0; i < newIndices.length; i += 3) {
-            triangles.push([newIndices[i], newIndices[i + 1], newIndices[i + 2]]);
-        }
-        
-        // Simple optimization: sort by minimum vertex index
-        triangles.sort((a, b) => Math.min(...a) - Math.min(...b));
-        
-        const optimizedIndices = new Uint32Array(triangles.length * 3);
-        for (let i = 0; i < triangles.length; i++) {
-            optimizedIndices[i * 3] = triangles[i][0];
-            optimizedIndices[i * 3 + 1] = triangles[i][1];
-            optimizedIndices[i * 3 + 2] = triangles[i][2];
-        }
-        
-        // Update geometry with optimized data
-        geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(newPositions), 3));
-        geometry.setIndex(new THREE.BufferAttribute(optimizedIndices, 1));
-        
-        // Recompute normals with the optimized geometry
-        geometry.computeVertexNormals();
-        
-        // Step 4: Compute bounding sphere for frustum culling optimization
-        geometry.computeBoundingSphere();
-        geometry.computeBoundingBox();
-        
-        const endTime = performance.now();
-        const vertexReduction = ((vertexCount - newVertexCount) / vertexCount * 100).toFixed(1);
-        const triangleReduction = ((indices.length - optimizedIndices.length) / indices.length * 100).toFixed(1);
-        
-        this.logStatus(
-            `✓ Mesh optimized: ${vertexCount.toLocaleString()} → ${newVertexCount.toLocaleString()} vertices (-${vertexReduction}%), ` +
-            `${(indices.length / 3).toLocaleString()} → ${(optimizedIndices.length / 3).toLocaleString()} triangles (-${triangleReduction}%) ` +
-            `[${(endTime - startTime).toFixed(0)}ms]`,
-            'success'
-        );
-    }
+
     
-    simplifyHeightmap(heightMap, resolution, scale, center, clipZMin, clipZMax) {
-        const startTime = performance.now();
-        
-        // Pre-calculate coordinate transformation constants
-        const invResMinusOne = 1 / (resolution - 1);
-        const invScale = 1 / scale;
-        
-        // Build full vertex grid - no holes
-        const positions = [];
-        
-        for (let j = 0; j < resolution; j++) {
-            const flippedJ = resolution - 1 - j;
-            const yCoord = ((flippedJ * 2 * invResMinusOne - 1) + center.y) * invScale;
-            
-            for (let i = 0; i < resolution; i++) {
-                const heightIdx = flippedJ * resolution + i;
-                const x = ((i * 2 * invResMinusOne - 1) + center.x) * invScale;
-                let worldZ = (heightMap[heightIdx] + center.z) * invScale;
-                worldZ = Math.max(clipZMin, Math.min(clipZMax, worldZ));
-                
-                positions.push(x, yCoord, worldZ);
-            }
-        }
-        
-        // Build triangle indices - full grid triangulation
-        const indices = [];
-        
-        for (let j = 0; j < resolution - 1; j++) {
-            const rowOffset = j * resolution;
-            const nextRowOffset = (j + 1) * resolution;
-            
-            for (let i = 0; i < resolution - 1; i++) {
-                const a = rowOffset + i;
-                const b = rowOffset + i + 1;
-                const c = nextRowOffset + i;
-                const d = nextRowOffset + i + 1;
-                
-                // Two triangles per quad
-                indices.push(a, b, d);
-                indices.push(a, d, c);
-            }
-        }
-        
-        const endTime = performance.now();
-        
-        console.log(`Heightmap mesh created: ${resolution * resolution} vertices [${(endTime - startTime).toFixed(0)}ms]`);
-        
-        return {
-            vertices: new Float32Array(positions),
-            indices: new Uint32Array(indices)
-        };
-    }
-    
-    smoothHeightmap(heightMap, resolution, passes = 1) {
-        if (passes === 0) return heightMap;
-        
-        let current = new Float32Array(heightMap);
-        let temp = new Float32Array(resolution * resolution);
-        
-        // Use an even larger, very aggressive Gaussian kernel for ultra-smooth results
-        // 7-tap Gaussian kernel with maximum smoothing
-        const kernel = [0.03, 0.11, 0.22, 0.28, 0.22, 0.11, 0.03]; // Very wide, very smooth kernel
-        const kernelRadius = 3;
-        
-        // Apply 5x more passes for extremely smooth results
-        const effectivePasses = passes * 5;
-        
-        for (let pass = 0; pass < effectivePasses; pass++) {
-            // Horizontal pass
-            for (let y = 0; y < resolution; y++) {
-                for (let x = 0; x < resolution; x++) {
-                    let sum = 0;
-                    let weightSum = 0;
-                    
-                    for (let kx = -kernelRadius; kx <= kernelRadius; kx++) {
-                        const nx = x + kx;
-                        if (nx >= 0 && nx < resolution) {
-                            const idx = y * resolution + nx;
-                            const weight = kernel[kx + kernelRadius];
-                            sum += current[idx] * weight;
-                            weightSum += weight;
-                        }
-                    }
-                    
-                    temp[y * resolution + x] = sum / weightSum;
-                }
-            }
-            
-            // Vertical pass
-            for (let y = 0; y < resolution; y++) {
-                for (let x = 0; x < resolution; x++) {
-                    let sum = 0;
-                    let weightSum = 0;
-                    
-                    for (let ky = -kernelRadius; ky <= kernelRadius; ky++) {
-                        const ny = y + ky;
-                        if (ny >= 0 && ny < resolution) {
-                            const idx = ny * resolution + x;
-                            const weight = kernel[ky + kernelRadius];
-                            sum += temp[idx] * weight;
-                            weightSum += weight;
-                        }
-                    }
-                    
-                    current[y * resolution + x] = sum / weightSum;
-                }
-            }
-        }
-        
-        return current;
-    }
+
     
     addAxisLabels(size) {
         const createTextSprite = (text, color) => {
