@@ -1556,6 +1556,397 @@ class OffsetGeneratorApp {
         };
     }
     
+    // Extract contour lines at 0°, 45°, 90°, and 135° from heightmap
+    extractContourLines(heightMap, resolution, scale, center, clipZMin, clipZMax) {
+        const invResMinusOne = 1 / (resolution - 1);
+        const invScale = 1 / scale;
+        
+        const contourLines = {
+            angle0: [],   // Horizontal lines (0°)
+            angle90: [],  // Vertical lines (90°)
+            angle45: [],  // Diagonal lines (45°)
+            angleNeg45: [] // Diagonal lines (-45°)
+        };
+        
+        // Determine contour spacing (fewer lines for faster processing)
+        const spacing = Math.max(10, Math.floor(resolution / 30)); // ~30 contours per direction
+        
+        console.log(`Extracting contours with spacing: ${spacing} (resolution: ${resolution})`);
+        
+        // 0° - Horizontal lines (constant Y)
+        for (let y = 0; y < resolution; y += spacing) {
+            const points = [];
+            const flippedY = resolution - 1 - y;
+            const yCoord = ((flippedY * 2 * invResMinusOne - 1) + center.y) * invScale;
+            
+            for (let x = 0; x < resolution; x += 2) { // Sample every 2 pixels for speed
+                const idx = flippedY * resolution + x;
+                const xCoord = ((x * 2 * invResMinusOne - 1) + center.x) * invScale;
+                let zCoord = (heightMap[idx] + center.z) * invScale;
+                zCoord = Math.max(clipZMin, Math.min(clipZMax, zCoord));
+                
+                points.push({ x: xCoord, y: yCoord, z: zCoord });
+            }
+            contourLines.angle0.push(points);
+        }
+        
+        // 90° - Vertical lines (constant X)
+        for (let x = 0; x < resolution; x += spacing) {
+            const points = [];
+            const xCoord = ((x * 2 * invResMinusOne - 1) + center.x) * invScale;
+            
+            for (let y = 0; y < resolution; y += 2) { // Sample every 2 pixels for speed
+                const flippedY = resolution - 1 - y;
+                const idx = flippedY * resolution + x;
+                const yCoord = ((flippedY * 2 * invResMinusOne - 1) + center.y) * invScale;
+                let zCoord = (heightMap[idx] + center.z) * invScale;
+                zCoord = Math.max(clipZMin, Math.min(clipZMax, zCoord));
+                
+                points.push({ x: xCoord, y: yCoord, z: zCoord });
+            }
+            contourLines.angle90.push(points);
+        }
+        
+        // 45° - Diagonal lines (X + Y = constant)
+        for (let offset = -resolution; offset < resolution; offset += spacing) {
+            const points = [];
+            
+            for (let x = 0; x < resolution; x += 2) { // Sample every 2 pixels for speed
+                const y = x + offset;
+                if (y < 0 || y >= resolution) continue;
+                
+                const flippedY = resolution - 1 - y;
+                const idx = flippedY * resolution + x;
+                const xCoord = ((x * 2 * invResMinusOne - 1) + center.x) * invScale;
+                const yCoord = ((flippedY * 2 * invResMinusOne - 1) + center.y) * invScale;
+                let zCoord = (heightMap[idx] + center.z) * invScale;
+                zCoord = Math.max(clipZMin, Math.min(clipZMax, zCoord));
+                
+                points.push({ x: xCoord, y: yCoord, z: zCoord });
+            }
+            
+            if (points.length > 1) {
+                contourLines.angle45.push(points);
+            }
+        }
+        
+        // -45° - Diagonal lines (X + Y = constant, perpendicular to 45°)
+        for (let offset = 0; offset < 2 * resolution; offset += spacing) {
+            const points = [];
+            
+            for (let x = 0; x < resolution; x += 2) { // Sample every 2 pixels for speed
+                const y = -x + offset;  // Perpendicular to 45° line
+                if (y < 0 || y >= resolution) continue;
+                
+                const flippedY = resolution - 1 - y;
+                const idx = flippedY * resolution + x;
+                const xCoord = ((x * 2 * invResMinusOne - 1) + center.x) * invScale;
+                const yCoord = ((flippedY * 2 * invResMinusOne - 1) + center.y) * invScale;
+                let zCoord = (heightMap[idx] + center.z) * invScale;
+                zCoord = Math.max(clipZMin, Math.min(clipZMax, zCoord));
+                
+                points.push({ x: xCoord, y: yCoord, z: zCoord });
+            }
+            
+            if (points.length > 1) {
+                contourLines.angleNeg45.push(points);
+            }
+        }
+        
+        const totalLines = contourLines.angle0.length + contourLines.angle90.length + 
+                          contourLines.angle45.length + contourLines.angleNeg45.length;
+        console.log(`Extracted ${totalLines} contour lines (0°: ${contourLines.angle0.length}, 90°: ${contourLines.angle90.length}, 45°: ${contourLines.angle45.length}, -45°: ${contourLines.angleNeg45.length})`);
+        
+        return contourLines;
+    }
+    
+    // Find intersections between contour lines
+    findContourIntersections(contourLines) {
+        const vertices = [];
+        const vertexSet = new Set(); // To avoid duplicate vertices
+        
+        // Helper to add unique vertex
+        const addVertex = (x, y, z) => {
+            const key = `${x.toFixed(6)},${y.toFixed(6)},${z.toFixed(6)}`;
+            if (!vertexSet.has(key)) {
+                vertexSet.add(key);
+                vertices.push({ x, y, z });
+            }
+        };
+        
+        // Helper to find intersection between two 3D line segments
+        const findLineIntersection = (line1Points, line2Points) => {
+            // Check each segment of line1 against each segment of line2
+            for (let i = 0; i < line1Points.length - 1; i++) {
+                const p1 = line1Points[i];
+                const p2 = line1Points[i + 1];
+                
+                for (let j = 0; j < line2Points.length - 1; j++) {
+                    const p3 = line2Points[j];
+                    const p4 = line2Points[j + 1];
+                    
+                    // Find closest points between two 3D line segments
+                    const intersection = this.closestPointsBetweenSegments(p1, p2, p3, p4);
+                    
+                    if (intersection) {
+                        // Add midpoint as the intersection vertex
+                        const midX = (intersection.point1.x + intersection.point2.x) / 2;
+                        const midY = (intersection.point1.y + intersection.point2.y) / 2;
+                        const midZ = (intersection.point1.z + intersection.point2.z) / 2;
+                        addVertex(midX, midY, midZ);
+                    }
+                }
+            }
+        };
+        
+        // Find intersections between different angle groups
+        const angleGroups = [
+            { name: '0°', lines: contourLines.angle0 },
+            { name: '90°', lines: contourLines.angle90 },
+            { name: '45°', lines: contourLines.angle45 },
+            { name: '135°', lines: contourLines.angle135 }
+        ];
+        
+        // Check all pairs of angle groups
+        for (let i = 0; i < angleGroups.length; i++) {
+            for (let j = i + 1; j < angleGroups.length; j++) {
+                const group1 = angleGroups[i];
+                const group2 = angleGroups[j];
+                
+                console.log(`Finding intersections between ${group1.name} and ${group2.name}...`);
+                
+                // Check each line in group1 against each line in group2
+                for (const line1 of group1.lines) {
+                    for (const line2 of group2.lines) {
+                        findLineIntersection(line1, line2);
+                    }
+                }
+            }
+        }
+        
+        console.log(`Found ${vertices.length} unique intersection vertices`);
+        return vertices;
+    }
+    
+    // Find closest points between two 3D line segments
+    closestPointsBetweenSegments(p1, p2, p3, p4) {
+        const EPSILON = 0.0001;
+        const PROXIMITY_THRESHOLD = 0.5; // Maximum distance to consider as intersection
+        
+        // Direction vectors
+        const d1 = { x: p2.x - p1.x, y: p2.y - p1.y, z: p2.z - p1.z };
+        const d2 = { x: p4.x - p3.x, y: p4.y - p3.y, z: p4.z - p3.z };
+        
+        // Vector between segment start points
+        const r = { x: p1.x - p3.x, y: p1.y - p3.y, z: p1.z - p3.z };
+        
+        const a = d1.x * d1.x + d1.y * d1.y + d1.z * d1.z; // ||d1||^2
+        const b = d1.x * d2.x + d1.y * d2.y + d1.z * d2.z; // d1 · d2
+        const c = d2.x * d2.x + d2.y * d2.y + d2.z * d2.z; // ||d2||^2
+        const d = d1.x * r.x + d1.y * r.y + d1.z * r.z;    // d1 · r
+        const e = d2.x * r.x + d2.y * r.y + d2.z * r.z;    // d2 · r
+        
+        const denom = a * c - b * b;
+        
+        // Check if lines are parallel
+        if (Math.abs(denom) < EPSILON) {
+            return null;
+        }
+        
+        // Calculate parameters
+        let s = (b * e - c * d) / denom;
+        let t = (a * e - b * d) / denom;
+        
+        // Clamp to segment bounds [0, 1]
+        s = Math.max(0, Math.min(1, s));
+        t = Math.max(0, Math.min(1, t));
+        
+        // Calculate closest points
+        const point1 = {
+            x: p1.x + s * d1.x,
+            y: p1.y + s * d1.y,
+            z: p1.z + s * d1.z
+        };
+        
+        const point2 = {
+            x: p3.x + t * d2.x,
+            y: p3.y + t * d2.y,
+            z: p3.z + t * d2.z
+        };
+        
+        // Calculate distance between closest points
+        const dx = point2.x - point1.x;
+        const dy = point2.y - point1.y;
+        const dz = point2.z - point1.z;
+        const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        
+        // Only consider as intersection if points are close enough
+        if (distance < PROXIMITY_THRESHOLD) {
+            return { point1, point2, distance };
+        }
+        
+        return null;
+    }
+    
+    // Triangulate vertices using Delaunay triangulation (2D projection + Z interpolation)
+    triangulateIntersectionVertices(vertices) {
+        if (vertices.length < 3) {
+            console.error('Not enough vertices for triangulation');
+            return null;
+        }
+        
+        // Simple 2D Delaunay triangulation using ear clipping approximation
+        // For production, consider using libraries like Delaunator.js
+        
+        // Project vertices to XY plane and keep track of Z values
+        const points2D = vertices.map(v => ({ x: v.x, y: v.y, z: v.z }));
+        
+        // Create a bounding box to add boundary vertices
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const p of points2D) {
+            minX = Math.min(minX, p.x);
+            minY = Math.min(minY, p.y);
+            maxX = Math.max(maxX, p.x);
+            maxY = Math.max(maxY, p.y);
+        }
+        
+        // Use simple grid-based triangulation for now
+        // Sort vertices by X, then Y
+        points2D.sort((a, b) => {
+            if (Math.abs(a.x - b.x) < 0.001) return a.y - b.y;
+            return a.x - b.x;
+        });
+        
+        // Create triangles using a simple approach: connect nearby vertices
+        const positions = [];
+        const indices = [];
+        
+        // Add all vertices to positions array
+        for (const v of vertices) {
+            positions.push(v.x, v.y, v.z);
+        }
+        
+        // Create triangles by connecting nearby vertices (simplified triangulation)
+        // This is a basic approach - for better results, use proper Delaunay
+        const vertexCount = vertices.length;
+        const gridSize = Math.ceil(Math.sqrt(vertexCount));
+        
+        for (let i = 0; i < vertexCount - 2; i++) {
+            // Create triangles with next two vertices (simple fan triangulation)
+            // Better: use spatial hashing to find nearby vertices
+            const v0 = vertices[i];
+            
+            // Find two closest vertices to form a triangle
+            const distances = [];
+            for (let j = i + 1; j < vertexCount; j++) {
+                const v = vertices[j];
+                const dx = v.x - v0.x;
+                const dy = v.y - v0.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                distances.push({ idx: j, dist });
+            }
+            
+            distances.sort((a, b) => a.dist - b.dist);
+            
+            if (distances.length >= 2) {
+                const idx1 = distances[0].idx;
+                const idx2 = distances[1].idx;
+                
+                // Check if triangle is not degenerate
+                if (this.isValidTriangle(vertices[i], vertices[idx1], vertices[idx2])) {
+                    indices.push(i, idx1, idx2);
+                }
+            }
+        }
+        
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+        geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
+        geometry.computeVertexNormals();
+        
+        console.log(`Created mesh: ${vertexCount} vertices, ${indices.length / 3} triangles`);
+        return geometry;
+    }
+    
+    // Check if triangle is valid (non-degenerate and reasonable size)
+    isValidTriangle(v0, v1, v2) {
+        const EPSILON = 0.001;
+        const MAX_EDGE_LENGTH = 50; // Maximum edge length for valid triangles
+        
+        // Calculate edge lengths
+        const dx1 = v1.x - v0.x, dy1 = v1.y - v0.y, dz1 = v1.z - v0.z;
+        const dx2 = v2.x - v0.x, dy2 = v2.y - v0.y, dz2 = v2.z - v0.z;
+        const dx3 = v2.x - v1.x, dy3 = v2.y - v1.y, dz3 = v2.z - v1.z;
+        
+        const len1 = Math.sqrt(dx1 * dx1 + dy1 * dy1 + dz1 * dz1);
+        const len2 = Math.sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2);
+        const len3 = Math.sqrt(dx3 * dx3 + dy3 * dy3 + dz3 * dz3);
+        
+        // Check if any edge is too short or too long
+        if (len1 < EPSILON || len2 < EPSILON || len3 < EPSILON) return false;
+        if (len1 > MAX_EDGE_LENGTH || len2 > MAX_EDGE_LENGTH || len3 > MAX_EDGE_LENGTH) return false;
+        
+        // Calculate area using cross product
+        const crossX = dy1 * dz2 - dz1 * dy2;
+        const crossY = dz1 * dx2 - dx1 * dz2;
+        const crossZ = dx1 * dy2 - dy1 * dx2;
+        const area = Math.sqrt(crossX * crossX + crossY * crossY + crossZ * crossZ) / 2;
+        
+        // Reject triangles with very small area
+        return area > EPSILON;
+    }
+    
+    // Visualize contour lines
+    async visualizeContourLines(contourLines) {
+        // Remove previous contour lines
+        if (this.heightmapLines) {
+            if (Array.isArray(this.heightmapLines)) {
+                this.heightmapLines.forEach(line => {
+                    this.scene.remove(line);
+                    if (line.geometry) line.geometry.dispose();
+                    if (line.material) line.material.dispose();
+                });
+            }
+        }
+        
+        const lines = [];
+        const isVisible = document.getElementById('show-heightmap-lines').checked;
+        
+        // Color scheme for different angles
+        const colors = {
+            angle0: 0xff0000,   // Red for 0°
+            angle90: 0x00ff00,  // Green for 90°
+            angle45: 0x0000ff,  // Blue for 45°
+            angleNeg45: 0xffff00  // Yellow for -45°
+        };
+        
+        // Create lines for each angle group
+        for (const [angleKey, contours] of Object.entries(contourLines)) {
+            const material = new THREE.LineBasicMaterial({ 
+                color: colors[angleKey],
+                linewidth: 2
+            });
+            
+            for (const points of contours) {
+                const positions = [];
+                for (const p of points) {
+                    positions.push(p.x, p.y, p.z);
+                }
+                
+                const geometry = new THREE.BufferGeometry();
+                geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+                
+                const line = new THREE.Line(geometry, material);
+                line.visible = isVisible;
+                this.scene.add(line);
+                lines.push(line);
+            }
+        }
+        
+        this.heightmapLines = lines;
+        console.log(`Visualized ${lines.length} contour lines`);
+    }
+
     async createMeshFromHeightmap(result, offsetDistance) {
         // Remove previous heightmap mesh and lines
         if (this.heightmapMesh) {
@@ -1597,49 +1988,24 @@ class OffsetGeneratorApp {
             return;
         }
         
-        this.logStatus('Creating mesh from heightmap...', 'info');
+        this.logStatus('Extracting and visualizing contour lines...', 'info');
         
         // Calculate clipping bounds: original bounding box + offset
         const originalBox = new THREE.Box3().setFromObject(this.originalMesh);
         const clipZMin = originalBox.min.z - offsetDistance;
         const clipZMax = originalBox.max.z + offsetDistance;
         
-        // Optimize heightmap before mesh creation by removing flat regions
-        this.logStatus('Simplifying flat regions in heightmap...', 'info');
-        const simplificationResult = this.simplifyHeightmap(heightMap, resolution, scale, center, clipZMin, clipZMax);
+        // Extract contour lines at 0, 45, 90, and -45 degrees
+        this.logStatus('Extracting contour lines at 0°, 45°, 90°, -45°...', 'info');
+        const contourLines = this.extractContourLines(heightMap, resolution, scale, center, clipZMin, clipZMax);
         
-        this.logStatus(`Creating optimized mesh (${simplificationResult.vertices.length / 3} vertices from ${resolution * resolution})...`, 'info');
+        // Visualize contour lines only (no mesh generation yet)
+        await this.visualizeContourLines(contourLines);
         
-        // Create mesh geometry from simplified heightmap
-        const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute('position', new THREE.BufferAttribute(simplificationResult.vertices, 3));
-        geometry.setIndex(new THREE.BufferAttribute(simplificationResult.indices, 1));
-        geometry.computeVertexNormals();
+        this.logStatus('✓ Contour lines displayed', 'success');
         
-        // Further optimize the mesh geometry
-        this.logStatus('Optimizing mesh geometry...', 'info');
-        this.optimizeMeshGeometry(geometry, resolution);
-        
-        // Create material with wireframe overlay
-        const material = new THREE.MeshStandardMaterial({
-            color: 0xffffff,
-            side: THREE.DoubleSide,
-            wireframe: false,
-            transparent: true,
-            opacity: 0.7,
-            metalness: 0.0,
-            roughness: 0.8
-        });
-        
-        this.heightmapMesh = new THREE.Mesh(geometry, material);
-        this.heightmapMesh.visible = document.getElementById('show-heightmap').checked;
-        this.scene.add(this.heightmapMesh);
-        
-        // Create contour lines for visualization - pass heightmap and clipping bounds to avoid reloading
-        await this.createHeightmapContourLines(result, heightMap, offsetDistance, clipZMin, clipZMax);
-        
-        const finalVertexCount = simplificationResult.vertices.length / 3;
-        this.logStatus(`✓ Mesh created from heightmap: ${resolution}x${resolution} (${finalVertexCount.toLocaleString()} vertices)`, 'success');
+        // TODO: Next steps - find intersections and create mesh
+        // For now, just show the contour lines
     }
     
     async createHeightmapContourLines(result, heightmapData, offsetDistance, clipZMin, clipZMax) {
