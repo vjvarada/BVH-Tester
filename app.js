@@ -948,13 +948,7 @@ class OffsetGeneratorApp {
         this.stats = null;
         
         this.originalMesh = null;
-        this.offsetMesh = null;
         this.heightmapMesh = null;
-        this.heightmapLines = null;
-        this.bboxHelper = null;
-        this.axesHelper = null;
-        this.axisLabels = [];
-        this.rayHelpers = [];
         
         this.loadedGeometry = null;
         
@@ -1014,11 +1008,6 @@ class OffsetGeneratorApp {
         const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.4);
         directionalLight2.position.set(-10, -10, -5);
         this.scene.add(directionalLight2);
-        
-        // Axes Helper
-        this.axesHelper = new THREE.AxesHelper(100);
-        this.scene.add(this.axesHelper);
-        this.addAxisLabels(100);
         
         // Stats
         this.stats = new Stats();
@@ -1084,59 +1073,13 @@ class OffsetGeneratorApp {
         // Export button
         document.getElementById('export-stl-btn').addEventListener('click', () => this.exportSTL());
         
-        // Adaptive resolution toggle
-        document.getElementById('adaptive-resolution').addEventListener('change', (e) => {
-            const label = document.getElementById('resolution-label');
-            const input = document.getElementById('heightmap-resolution');
-            if (e.target.checked) {
-                label.textContent = 'Pixels Per Unit:';
-                input.value = '10';
-                input.min = '1';
-                input.max = '50';
-                input.step = '1';
-            } else {
-                label.textContent = 'Heightmap Resolution:';
-                input.value = '512';
-                input.min = '64';
-                input.max = '16384';
-                input.step = '64';
-            }
-        });
-        
         // View toggles
         document.getElementById('show-original').addEventListener('change', (e) => {
             if (this.originalMesh) this.originalMesh.visible = e.target.checked;
         });
         
-        document.getElementById('show-offset').addEventListener('change', (e) => {
-            if (this.offsetMesh) this.offsetMesh.visible = e.target.checked;
-        });
-        
         document.getElementById('show-heightmap').addEventListener('change', (e) => {
             if (this.heightmapMesh) this.heightmapMesh.visible = e.target.checked;
-        });
-        
-        document.getElementById('show-heightmap-lines').addEventListener('change', (e) => {
-            if (this.heightmapLines) {
-                if (Array.isArray(this.heightmapLines)) {
-                    this.heightmapLines.forEach(line => line.visible = e.target.checked);
-                } else {
-                    this.heightmapLines.visible = e.target.checked;
-                }
-            }
-        });
-        
-        document.getElementById('show-bbox').addEventListener('change', (e) => {
-            if (this.bboxHelper) this.bboxHelper.visible = e.target.checked;
-        });
-        
-        document.getElementById('show-axes').addEventListener('change', (e) => {
-            if (this.axesHelper) this.axesHelper.visible = e.target.checked;
-            this.axisLabels.forEach(label => label.visible = e.target.checked);
-        });
-        
-        document.getElementById('debug-rays').addEventListener('change', (e) => {
-            this.rayHelpers.forEach(helper => helper.visible = e.target.checked);
         });
     }
     
@@ -1172,13 +1115,8 @@ class OffsetGeneratorApp {
             this.originalMesh = new THREE.Mesh(geometry, material);
             this.scene.add(this.originalMesh);
             
-            // Add bounding box helper
-            const box = new THREE.Box3().setFromObject(this.originalMesh);
-            this.bboxHelper = new THREE.Box3Helper(box, 0xffff00);
-            this.bboxHelper.visible = document.getElementById('show-bbox').checked;
-            this.scene.add(this.bboxHelper);
-            
             // Center camera on object
+            const box = new THREE.Box3().setFromObject(this.originalMesh);
             const center = new THREE.Vector3();
             box.getCenter(center);
             const size = new THREE.Vector3();
@@ -1242,50 +1180,41 @@ class OffsetGeneratorApp {
             return;
         }
         
-        const isAdaptive = document.getElementById('adaptive-resolution').checked;
+        // Calculate effective resolution using adaptive mode (pixels per unit)
+        const box = new THREE.Box3().setFromObject(this.originalMesh);
+        const size = new THREE.Vector3();
+        box.getSize(size);
+        const maxDim = Math.max(size.x, size.y, size.z);
         
-        // Calculate effective resolution
-        let resolution;
-        if (isAdaptive) {
-            // Adaptive mode: pixels per unit
-            const box = new THREE.Box3().setFromObject(this.originalMesh);
-            const size = new THREE.Vector3();
-            box.getSize(size);
-            const maxDim = Math.max(size.x, size.y, size.z);
-            
-            // Add padding for offset
-            const effectiveDim = maxDim + (offsetDistance * 10); // 5x padding on each side
-            resolution = Math.ceil(effectiveDim * resolutionInput);
-            
-            // Clamp to reasonable limits (now supports up to 16384)
-            resolution = Math.max(64, Math.min(16384, resolution));
-            
-            this.logStatus(`Adaptive resolution: ${maxDim.toFixed(1)} units × ${resolutionInput} px/unit = ${resolution}×${resolution}`, 'info');
-        } else {
-            // Fixed mode: absolute resolution
-            resolution = resolutionInput;
-        }
+        // Add padding for offset
+        const effectiveDim = maxDim + (offsetDistance * 10); // 5x padding on each side
+        const resolution = Math.ceil(effectiveDim * resolutionInput);
         
-        this.logStatus(`Generating offset (distance: ${offsetDistance}, resolution: ${resolution})...`, 'info');
+        // Clamp to reasonable limits (now supports up to 16384)
+        const clampedResolution = Math.max(64, Math.min(16384, resolution));
+        
+        this.logStatus(`Adaptive resolution: ${maxDim.toFixed(1)} units × ${resolutionInput} px/unit = ${clampedResolution}×${clampedResolution}`, 'info');
+        
+        this.logStatus(`Generating offset (distance: ${offsetDistance}, resolution: ${clampedResolution})...`, 'info');
         
         // Get vertices as Float32Array
         const vertices = this.loadedGeometry.attributes.position.array;
         
         try {
             // Show progress bar for large resolutions
-            if (resolution > 2048) {
+            if (clampedResolution > 2048) {
                 this.showProgress('Rendering tiles...');
             }
             
             // Progress callback for tiled rendering
-            const progressCallback = resolution > 2048 ? (current, total) => {
+            const progressCallback = clampedResolution > 2048 ? (current, total) => {
                 const percent = (current / total) * 100;
                 this.updateProgress(percent, current, total);
                 this.logStatus(`Rendering tile ${current}/${total}...`, 'info');
             } : null;
             
             // Generate heightmap using the offset algorithm (may be async for tiled rendering)
-            const result = await createOffsetHeightMap(vertices, offsetDistance, resolution, 2048, progressCallback);
+            const result = await createOffsetHeightMap(vertices, offsetDistance, clampedResolution, 2048, progressCallback);
             
             // Hide progress bar
             this.hideProgress();
@@ -1296,9 +1225,6 @@ class OffsetGeneratorApp {
                 this.logStatus(`✓ Heightmap generated (${result.resolution}x${result.resolution})`, 'success');
             }
             
-            // Create offset mesh visualization
-            this.createOffsetMeshVisualization(result, offsetDistance);
-            
             // Create mesh from heightmap data
             await this.createMeshFromHeightmap(result, offsetDistance);
             
@@ -1307,54 +1233,6 @@ class OffsetGeneratorApp {
             this.logStatus(`✗ Error generating offset: ${error.message}`, 'error');
             console.error('Offset generation error:', error);
         }
-    }
-    
-    createOffsetMeshVisualization(result, offsetDistance) {
-        // Remove previous offset mesh
-        if (this.offsetMesh) {
-            this.scene.remove(this.offsetMesh);
-            this.offsetMesh.geometry.dispose();
-            this.offsetMesh.material.dispose();
-        }
-        
-        // Create a simple offset by moving vertices along normals
-        const originalGeometry = this.loadedGeometry;
-        const offsetGeometry = originalGeometry.clone();
-        
-        // Compute normals if not present
-        if (!offsetGeometry.attributes.normal) {
-            offsetGeometry.computeVertexNormals();
-        }
-        
-        const positions = offsetGeometry.attributes.position.array;
-        const normals = offsetGeometry.attributes.normal.array;
-        
-        for (let i = 0; i < positions.length; i += 3) {
-            positions[i] += normals[i] * offsetDistance;
-            positions[i + 1] += normals[i + 1] * offsetDistance;
-            positions[i + 2] += normals[i + 2] * offsetDistance;
-        }
-        
-        offsetGeometry.attributes.position.needsUpdate = true;
-        offsetGeometry.computeVertexNormals(); // Recompute normals after moving vertices
-        offsetGeometry.computeBoundingSphere();
-        
-        const material = new THREE.MeshStandardMaterial({ 
-            color: 0x81c784,
-            transparent: true,
-            opacity: 0.5,
-            side: THREE.DoubleSide,
-            wireframe: false,
-            metalness: 0.1,
-            roughness: 0.7,
-            flatShading: false
-        });
-        
-        this.offsetMesh = new THREE.Mesh(offsetGeometry, material);
-        this.offsetMesh.visible = document.getElementById('show-offset').checked;
-        this.scene.add(this.offsetMesh);
-        
-        this.logStatus('✓ Offset mesh created', 'success');
     }
     
     async createMeshFromHeightmap(result, offsetDistance) {
@@ -1428,9 +1306,6 @@ class OffsetGeneratorApp {
         this.heightmapMesh = new THREE.Mesh(geometry, material);
         this.heightmapMesh.visible = document.getElementById('show-heightmap').checked;
         this.scene.add(this.heightmapMesh);
-        
-        // Create contour lines for visualization - pass heightmap and clipping bounds to avoid reloading
-        await this.createHeightmapContourLines(result, heightMap, offsetDistance, clipZMin, clipZMax);
         
         const finalVertexCount = geometry.getAttribute('position').count;
         this.logStatus(`✓ Watertight mesh created: ${finalVertexCount.toLocaleString()} vertices`, 'success');
@@ -2689,111 +2564,6 @@ class OffsetGeneratorApp {
         heightMap.set(smoothed);
     }
     
-    async createHeightmapContourLines(result, heightmapData, offsetDistance, clipZMin, clipZMax) {
-        // Remove previous heightmap lines
-        if (this.heightmapLines) {
-            if (Array.isArray(this.heightmapLines)) {
-                this.heightmapLines.forEach(line => {
-                    this.scene.remove(line);
-                    if (line.geometry) line.geometry.dispose();
-                    if (line.material) line.material.dispose();
-                });
-            } else {
-                this.scene.remove(this.heightmapLines);
-                if (this.heightmapLines.geometry) this.heightmapLines.geometry.dispose();
-                if (this.heightmapLines.material) this.heightmapLines.material.dispose();
-            }
-            this.heightmapLines = null;
-        }
-        
-        const { resolution, scale, center } = result;
-        
-        // Use provided heightmap data or load if not available
-        let heightMap = heightmapData;
-        if (!heightMap) {
-            if (result.usesIndexedDB) {
-                this.showProgress('Loading contour data...');
-                const loadProgress = (current, total) => {
-                    const percent = (current / total) * 100;
-                    this.updateProgress(percent, current, total);
-                };
-                heightMap = await loadHeightMapFromTiles(result, loadProgress);
-                this.hideProgress();
-            } else {
-                heightMap = result.heightMap;
-            }
-        }
-        
-        if (!heightMap) {
-            this.logStatus('✗ Failed to load heightmap data', 'error');
-            return;
-        }
-        
-        // Use provided clipping bounds or calculate if not available
-        if (clipZMin === undefined || clipZMax === undefined) {
-            const originalBox = new THREE.Box3().setFromObject(this.originalMesh);
-            clipZMin = originalBox.min.z - offsetDistance;
-            clipZMax = originalBox.max.z + offsetDistance;
-        }
-        
-        // Create horizontal contour lines for visualization
-        // Draw lines at regular intervals across the heightmap
-        const numLines = Math.floor(resolution / 7); // ~150 lines for 1024 resolution
-        const lineStep = Math.floor(resolution / numLines);
-        
-        this.logStatus(`Creating ${numLines} horizontal contour lines for visualization...`, 'info');
-        
-        // Pre-calculate coordinate transformation constants
-        const invResMinusOne = 1 / (resolution - 1);
-        const invScale = 1 / scale;
-        
-        // Share a single material for all lines (instancing)
-        const sharedLineMaterial = new THREE.LineBasicMaterial({ 
-            color: 0x0000ff,
-            linewidth: 1
-        });
-        
-        const lines = [];
-        const isVisible = document.getElementById('show-heightmap-lines').checked;
-        
-        // Create horizontal contour lines (Y direction)
-        for (let j = 0; j < resolution; j += lineStep) {
-            const positions = new Float32Array(resolution * 3);
-            const flippedJ = resolution - 1 - j;
-            const yCoord = ((flippedJ * 2 * invResMinusOne - 1) + center.y) * invScale;
-            
-            let posIdx = 0;
-            for (let i = 0; i < resolution; i++) {
-                // Get heightmap value with Y-flip to match rendering
-                const idx = flippedJ * resolution + i;
-                
-                // Map to world coordinates
-                const x = ((i * 2 * invResMinusOne - 1) + center.x) * invScale;
-                let worldZ = (heightMap[idx] + center.z) * invScale;
-                
-                // Clip Z to bounding box + offset range
-                worldZ = Math.max(clipZMin, Math.min(clipZMax, worldZ));
-                
-                positions[posIdx++] = x;
-                positions[posIdx++] = yCoord;
-                positions[posIdx++] = worldZ;
-            }
-            
-            const lineGeometry = new THREE.BufferGeometry();
-            lineGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-            
-            const line = new THREE.Line(lineGeometry, sharedLineMaterial);
-            line.visible = isVisible;
-            this.scene.add(line);
-            lines.push(line);
-        }
-        
-        // Store contour lines array
-        this.heightmapLines = lines;
-        
-        this.logStatus(`✓ ${lines.length} contour lines created`, 'success');
-    }
-    
     async exportSTL() {
         if (!this.heightmapMesh) {
             this.logStatus('✗ No heightmap mesh to export. Generate offset first.', 'error');
@@ -3032,52 +2802,10 @@ class OffsetGeneratorApp {
     }
 
     
-    addAxisLabels(size) {
-        const createTextSprite = (text, color) => {
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            canvas.width = 256;
-            canvas.height = 256;
-            
-            ctx.fillStyle = color;
-            ctx.font = 'Bold 120px Arial';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(text, 128, 128);
-            
-            const texture = new THREE.CanvasTexture(canvas);
-            const spriteMaterial = new THREE.SpriteMaterial({ 
-                map: texture,
-                depthTest: false,
-                depthWrite: false
-            });
-            const sprite = new THREE.Sprite(spriteMaterial);
-            sprite.scale.set(15, 15, 1);
-            
-            return sprite;
-        };
-
-        const xLabel = createTextSprite('X', '#ff0000');
-        xLabel.position.set(size * 1.1, 0, 0);
-        this.scene.add(xLabel);
-        this.axisLabels.push(xLabel);
-
-        const yLabel = createTextSprite('Y', '#00ff00');
-        yLabel.position.set(0, size * 1.1, 0);
-        this.scene.add(yLabel);
-        this.axisLabels.push(yLabel);
-
-        const zLabel = createTextSprite('Z', '#0000ff');
-        zLabel.position.set(0, 0, size * 1.1);
-        this.scene.add(zLabel);
-        this.axisLabels.push(zLabel);
-    }
-    
     clearScene() {
         // Clear meshes with proper disposal
         const meshesToClear = [
             { mesh: this.originalMesh, name: 'originalMesh' },
-            { mesh: this.offsetMesh, name: 'offsetMesh' },
             { mesh: this.heightmapMesh, name: 'heightmapMesh' }
         ];
         
@@ -3093,36 +2821,6 @@ class OffsetGeneratorApp {
                 this[name] = null;
             }
         });
-        
-        // Clear heightmap lines (now an array of Line objects)
-        if (this.heightmapLines) {
-            if (Array.isArray(this.heightmapLines)) {
-                this.heightmapLines.forEach(line => {
-                    this.scene.remove(line);
-                    if (line.geometry) line.geometry.dispose();
-                    if (line.material) line.material.dispose();
-                });
-            } else {
-                this.scene.remove(this.heightmapLines);
-                if (this.heightmapLines.geometry) this.heightmapLines.geometry.dispose();
-                if (this.heightmapLines.material) this.heightmapLines.material.dispose();
-            }
-            this.heightmapLines = null;
-        }
-        
-        if (this.bboxHelper) {
-            this.scene.remove(this.bboxHelper);
-            this.bboxHelper.dispose();
-            this.bboxHelper = null;
-        }
-        
-        // Clear ray helpers
-        this.rayHelpers.forEach(helper => {
-            this.scene.remove(helper);
-            if (helper.geometry) helper.geometry.dispose();
-            if (helper.material) helper.material.dispose();
-        });
-        this.rayHelpers = [];
     }
     
     // New comprehensive cleanup method
@@ -3146,16 +2844,6 @@ class OffsetGeneratorApp {
         
         // Clean up offscreen resources
         cleanupOffscreenResources();
-        
-        // Clean up axis labels
-        this.axisLabels.forEach(label => {
-            this.scene.remove(label);
-            if (label.material) {
-                if (label.material.map) label.material.map.dispose();
-                label.material.dispose();
-            }
-        });
-        this.axisLabels = [];
     }
     
     logStatus(message, type = 'info') {
