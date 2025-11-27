@@ -359,6 +359,82 @@ async function getTileDB() {
 // ============================================
 
 /**
+ * Remove isolated outlier pixels that create cone artifacts
+ * Only removes interior outliers, preserves boundary edges
+ */
+function removeIsolatedOutliers(heightMap, resolution, heightThreshold = 0.15) {
+    const INVALID_VALUE = -0.99;
+    const kernelSize = 5; // Check 5x5 neighborhood
+    const halfKernel = Math.floor(kernelSize / 2);
+    const removed = [];
+    
+    for (let y = halfKernel; y < resolution - halfKernel; y++) {
+        for (let x = halfKernel; x < resolution - halfKernel; x++) {
+            const idx = y * resolution + x;
+            
+            // Skip if already invalid
+            if (heightMap[idx] <= INVALID_VALUE) continue;
+            
+            const currentHeight = heightMap[idx];
+            
+            // Collect valid neighbor heights and count invalid neighbors
+            const neighborHeights = [];
+            let invalidCount = 0;
+            
+            for (let ky = -halfKernel; ky <= halfKernel; ky++) {
+                for (let kx = -halfKernel; kx <= halfKernel; kx++) {
+                    if (kx === 0 && ky === 0) continue;
+                    
+                    const nx = x + kx;
+                    const ny = y + ky;
+                    const nIdx = ny * resolution + nx;
+                    
+                    if (heightMap[nIdx] > INVALID_VALUE) {
+                        neighborHeights.push(heightMap[nIdx]);
+                    } else {
+                        invalidCount++;
+                    }
+                }
+            }
+            
+            // Skip if near boundary (has many invalid neighbors)
+            // Boundary pixels are legitimate features, not outliers
+            if (invalidCount > 3) continue;
+            
+            // Need at least some valid neighbors to compare
+            if (neighborHeights.length < 8) continue;
+            
+            // Calculate median neighbor height (more robust than mean)
+            neighborHeights.sort((a, b) => a - b);
+            const medianHeight = neighborHeights[Math.floor(neighborHeights.length / 2)];
+            
+            // Calculate how different this pixel is from neighbors
+            const heightDiff = Math.abs(currentHeight - medianHeight);
+            
+            // Check if it's an extreme outlier compared to most neighbors
+            let similarCount = 0;
+            for (const h of neighborHeights) {
+                if (Math.abs(currentHeight - h) < heightThreshold) {
+                    similarCount++;
+                }
+            }
+            
+            // Only remove if different from median AND different from most neighbors
+            // This preserves legitimate features while removing artifacts
+            const similarRatio = similarCount / neighborHeights.length;
+            if (heightDiff > heightThreshold && similarRatio < 0.3) {
+                heightMap[idx] = -1.0; // Mark as invalid
+                removed.push(idx);
+            }
+        }
+    }
+    
+    if (removed.length > 0) {
+        console.log(`Removed ${removed.length} interior outlier pixels`);
+    }
+}
+
+/**
  * Apply morphological closing to fill interior holes only
  * Uses flood-fill from edges to identify exterior empty regions vs interior holes
  */
@@ -367,6 +443,9 @@ function applyMorphologicalClosing(heightMap, resolution, iterations = 5, kernel
     
     const INVALID_VALUE = -0.99; // Empty pixels are at -1.0 (renderer clear value)
     const halfKernel = Math.floor(kernelSize / 2);
+    
+    // Step 0: Remove isolated outliers that create cone artifacts
+    removeIsolatedOutliers(heightMap, resolution, 0.15);
     
     // Step 1: Mark exterior empty regions using flood-fill from edges
     const isExterior = new Uint8Array(heightMap.length); // 0 = unknown, 1 = exterior, 2 = interior hole
