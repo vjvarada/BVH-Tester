@@ -7,7 +7,6 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import Stats from 'three/addons/libs/stats.module.js';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
-import { MeshoptSimplifier } from './node_modules/meshoptimizer/meshopt_simplifier.module.js';
 
 // Import modular offset mesh processor
 import { createOffsetMesh, extractVertices, cleanup } from './offsetMeshProcessor.js';
@@ -253,10 +252,27 @@ class OffsetGeneratorApp {
             // Extract vertices
             const vertices = extractVertices(this.loadedGeometry);
             
-            // Create offset mesh using modular processor
+            // Get simplification settings
+            const simplifyCheckbox = document.getElementById('simplify-mesh');
+            const simplifyMesh = simplifyCheckbox?.checked || false;
+            const simplifyRatio = simplifyMesh ? parseFloat(document.getElementById('simplify-ratio')?.value || 0.5) : null;
+            
+            // Get manifold verification setting
+            const verifyManifold = document.getElementById('check-manifold')?.checked || false;
+            
+            this.logStatus(`Mesh simplification: ${simplifyMesh ? `ENABLED (${(simplifyRatio * 100).toFixed(0)}%)` : 'DISABLED'}`, 'info');
+            if (simplifyMesh && verifyManifold) {
+                this.logStatus('Manifold verification: ENABLED (will fallback to full mesh if needed)', 'info');
+            } else if (simplifyMesh && !verifyManifold) {
+                this.logStatus('Manifold verification: DISABLED (will use simplified mesh as-is)', 'info');
+            }
+            
+            // Create offset mesh using modular processor (with optional simplification)
             const result = await createOffsetMesh(vertices, {
                 offsetDistance,
                 pixelsPerUnit,
+                simplifyRatio,
+                verifyManifold,
                 tileSize: 2048,
                 progressCallback: (percent, total, stage) => {
                     this.updateProgress(percent, percent, 100);
@@ -266,41 +282,20 @@ class OffsetGeneratorApp {
             
             this.hideProgress();
             
-            // Get metadata first
+            // Get metadata
             const { metadata } = result;
-            const originalTriangleCount = metadata.triangleCount;
+            const finalGeometry = result.geometry;
             
-            // Optional mesh simplification
-            const simplifyCheckbox = document.getElementById('simplify-mesh');
-            const simplifyMesh = simplifyCheckbox?.checked || false;
-            let finalGeometry = result.geometry;
-            
-            this.logStatus(`Mesh simplification checkbox: ${simplifyMesh ? 'ENABLED' : 'DISABLED'}`, 'info');
-            
-            if (simplifyMesh) {
-                const targetRatio = parseFloat(document.getElementById('simplify-ratio')?.value || 0.5);
-                this.logStatus(`Starting mesh simplification (target ratio: ${(targetRatio * 100).toFixed(0)}%)...`, 'info');
-                const simplifyStartTime = performance.now();
-                
-                try {
-                    this.logStatus(`Original mesh: ${originalTriangleCount.toLocaleString()} triangles`, 'info');
-                    finalGeometry = await this.simplifyGeometry(result.geometry, targetRatio);
-                    const simplifyTime = performance.now() - simplifyStartTime;
-                    const newTriangleCount = finalGeometry.index.count / 3;
-                    const reduction = ((1 - newTriangleCount / originalTriangleCount) * 100).toFixed(1);
-                    
-                    this.logStatus(
-                        `✓ Mesh simplified: ${originalTriangleCount.toLocaleString()} → ${newTriangleCount.toLocaleString()} triangles (${reduction}% reduction)`,
-                        'success'
-                    );
-                    this.logStatus(`⏱ Simplification time: ${simplifyTime.toFixed(0)}ms`, 'info');
-                } catch (error) {
-                    this.logStatus(`✗ Simplification failed: ${error.message}`, 'error');
-                    console.error('Simplification error:', error);
-                    finalGeometry = result.geometry;
-                }
-            } else {
-                this.logStatus('Mesh simplification skipped (checkbox not enabled)', 'info');
+            // Log simplification results if applied
+            if (metadata.simplificationApplied) {
+                const reduction = ((1 - metadata.triangleCount / metadata.originalTriangleCount) * 100).toFixed(1);
+                this.logStatus(
+                    `✓ Mesh simplified: ${metadata.originalTriangleCount.toLocaleString()} → ${metadata.triangleCount.toLocaleString()} triangles (${reduction}% reduction)`,
+                    'success'
+                );
+                this.logStatus(`⏱ Simplification time: ${metadata.simplificationTime.toFixed(0)}ms`, 'info');
+            } else if (simplifyMesh) {
+                this.logStatus('Mesh simplification not applied (check console for details)', 'info');
             }
             
             // Remove previous offset mesh
@@ -364,56 +359,6 @@ class OffsetGeneratorApp {
             this.logStatus(`✗ Error generating offset: ${error.message}`, 'error');
             console.error('Offset generation error:', error);
         }
-    }
-    
-    async simplifyGeometry(geometry, targetRatio) {
-        // Wait for meshoptimizer to be ready
-        await MeshoptSimplifier.ready;
-        
-        // Extract mesh data
-        const positions = geometry.attributes.position.array;
-        const indices = geometry.index.array;
-        
-        // Validate input
-        if (!indices || indices.length === 0) {
-            throw new Error('Geometry has no indices');
-        }
-        if (!positions || positions.length === 0) {
-            throw new Error('Geometry has no positions');
-        }
-        
-        // Convert to Uint32Array and Float32Array if needed
-        const uint32Indices = indices instanceof Uint32Array ? indices : new Uint32Array(indices);
-        const float32Positions = positions instanceof Float32Array ? positions : new Float32Array(positions);
-        
-        // Calculate target index count with minimum threshold
-        // meshoptimizer requires at least 3 indices (1 triangle)
-        const minIndexCount = 3;
-        const targetIndexCount = Math.max(minIndexCount, Math.floor(uint32Indices.length * targetRatio));
-        
-        // Ensure target is divisible by 3 (triangles)
-        const adjustedTargetIndexCount = Math.floor(targetIndexCount / 3) * 3;
-        
-        this.logStatus(`Simplifying: ${uint32Indices.length} → ${adjustedTargetIndexCount} indices (target ratio: ${targetRatio})`, 'info');
-        
-        // Simplify using meshoptimizer
-        const [simplifiedIndices, error] = MeshoptSimplifier.simplify(
-            uint32Indices,
-            float32Positions,
-            3, // stride (xyz)
-            adjustedTargetIndexCount,
-            0.01 // target error
-        );
-        
-        this.logStatus(`Simplification result: ${simplifiedIndices.length} indices, error: ${error.toFixed(6)}`, 'info');
-        
-        // Create new geometry with simplified indices
-        const simplifiedGeometry = new THREE.BufferGeometry();
-        simplifiedGeometry.setAttribute('position', geometry.attributes.position.clone());
-        simplifiedGeometry.setIndex(Array.from(simplifiedIndices));
-        simplifiedGeometry.computeVertexNormals();
-        
-        return simplifiedGeometry;
     }
     
     async exportSTL() {
