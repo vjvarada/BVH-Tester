@@ -9,6 +9,7 @@ A modular, reusable library for creating GPU-accelerated offset meshes from STL 
 - 🔧 **Flexible API** - Returns BufferGeometry for further processing (CSG, manipulation, etc.)
 - 💾 **Large Model Support** - Handles up to 16384×16384 resolution with tiling
 - ✅ **Watertight Meshes** - Generates manifold, 3D-printable geometry
+- 🎯 **Mesh Simplification** - Optional mesh simplification with manifold repair
 - 📊 **Progress Tracking** - Built-in progress callbacks
 - 🎯 **Adaptive Resolution** - Automatic sizing based on model dimensions
 
@@ -37,10 +38,12 @@ const vertices = extractVertices(geometry);
 const result = await createOffsetMesh(vertices, {
     offsetDistance: 5.0,        // Offset amount in world units
     pixelsPerUnit: 10,          // Resolution (higher = more detail)
-    downsampleFactor: 2         // Mesh optimization (1=full, 2=optimized, 4=fast)
+    simplifyRatio: 0.5,         // Optional: simplify to 50% of triangles
+    verifyManifold: true        // Optional: verify and repair manifold issues
 });
 
 console.log(`Created mesh: ${result.metadata.triangleCount} triangles`);
+console.log(`Simplified: ${result.metadata.simplificationApplied}`);
 
 // Export to STL when ready (application layer responsibility)
 const exportInfo = exportAndDownloadSTL(result.geometry, 'offset.stl');
@@ -85,10 +88,13 @@ const vertices = extractVertices(geometry);
 **Options:**
 - `offsetDistance` (required): Offset distance in world units
 - `pixelsPerUnit` (required): Resolution - pixels per unit (1-50)
-- `downsampleFactor` (optional): Mesh optimization level (default: 2)
-  - `1` = Full quality (no downsampling)
-  - `2` = Optimized (recommended)
-  - `3-4` = Fast (for large models)
+- `simplifyRatio` (optional): Mesh simplification ratio (0.1-1.0, default: null/disabled)
+  - `0.5` = Reduce to 50% of triangles
+  - `0.3` = Reduce to 30% of triangles
+  - `null` = No simplification
+- `verifyManifold` (optional): Verify and repair manifold issues (default: true)
+  - `true` = Verify simplified mesh is manifold, repair if needed, fallback to full mesh if repair fails
+  - `false` = Use simplified mesh as-is without verification
 - `tileSize` (optional): Tile size for large heightmaps (default: 2048)
 - `progressCallback` (optional): Function `(current, total, stage) => {}`
 
@@ -103,13 +109,11 @@ const vertices = extractVertices(geometry);
         resolution: Number,
         vertexCount: Number,
         triangleCount: Number,
-        isWatertight: Boolean,
+        originalTriangleCount: Number,    // Before simplification
+        simplificationApplied: Boolean,
+        simplificationTime: Number,
+        geometryCreationTime: Number,
         processingTime: Number
-    },
-    exportInfo: {                     // Only for createAndExportOffsetMesh
-        filename: String,
-        triangleCount: Number,
-        size: Number
     }
 }
 ```
@@ -142,17 +146,22 @@ const geometry = createWatertightMeshFromHeightmap(
 );
 ```
 
-### 4. `meshOptimizer.js` - Mesh Cleanup
+### 4. `meshOptimizer.js` - Mesh Cleanup & Simplification
 
 ```javascript
-import { removeDegenerateTriangles, verifyWatertightness } from './meshOptimizer.js';
+import { removeDegenerateTriangles, verifyWatertightness, repairNonManifoldMesh } from './meshOptimizer.js';
 
 // Remove bad triangles
-const cleanGeometry = await removeDegenerateTriangles(geometry);
+const cleanGeometry = removeDegenerateTriangles(geometry);
 
 // Verify manifold
 const verification = verifyWatertightness(geometry);
 console.log(`Watertight: ${verification.isWatertight}`);
+console.log(`Non-manifold edges: ${verification.nonManifoldEdges}`);
+
+// Repair non-manifold mesh
+const repairedGeometry = repairNonManifoldMesh(geometry, 3); // 3 iterations
+```
 ```
 
 ### 5. `stlExporter.js` - STL Export
@@ -234,22 +243,34 @@ const result = await createOffsetMesh(vertices, {
 });
 ```
 
-### Example 4: Custom Quality Settings
+### Example 4: Mesh Simplification Options
 
 ```javascript
-// High quality for small models
-const highQuality = await createOffsetMesh(vertices, {
+// Default: No simplification
+const fullMesh = await createOffsetMesh(vertices, {
     offsetDistance: 5.0,
-    pixelsPerUnit: 20,
-    downsampleFactor: 1
+    pixelsPerUnit: 10
 });
 
-// Fast processing for large models
-const fastProcessing = await createOffsetMesh(vertices, {
+// Simplify to 50% with manifold verification
+const simplifiedSafe = await createOffsetMesh(vertices, {
     offsetDistance: 5.0,
-    pixelsPerUnit: 5,
-    downsampleFactor: 4
+    pixelsPerUnit: 10,
+    simplifyRatio: 0.5,
+    verifyManifold: true  // Falls back to full mesh if simplification creates non-manifold issues
 });
+
+// Simplify to 30% without verification (always use simplified, even if non-manifold)
+const simplifiedAggressive = await createOffsetMesh(vertices, {
+    offsetDistance: 5.0,
+    pixelsPerUnit: 10,
+    simplifyRatio: 0.3,
+    verifyManifold: false  // Use simplified mesh as-is
+});
+
+console.log(`Original: ${fullMesh.metadata.triangleCount} triangles`);
+console.log(`Simplified (safe): ${simplifiedSafe.metadata.triangleCount} triangles`);
+console.log(`Applied: ${simplifiedSafe.metadata.simplificationApplied}`);
 ```
 
 ### Example 5: CSG Operations Before Export
@@ -285,11 +306,18 @@ console.log(`Shell exported: ${exportInfo.triangleCount} triangles`);
 - **10-15**: Balanced (recommended)
 - **20+**: High detail, slower
 
-### Mesh Optimization (downsampleFactor)
+### Mesh Simplification (simplifyRatio)
 
-- **1**: Full quality, no downsampling
-- **2**: Optimized, ~4x fewer triangles (recommended)
-- **3-4**: Fast, good for large models
+- **null/undefined**: No simplification (full quality)
+- **0.5-0.7**: Moderate reduction (recommended for most cases)
+- **0.3-0.5**: Aggressive reduction (good for very large meshes)
+- **0.1-0.3**: Extreme reduction (preview quality)
+
+**Manifold Verification:**
+- Enable (`verifyManifold: true`) when you need guaranteed watertight meshes for 3D printing
+- Disable (`verifyManifold: false`) when speed is more important than perfect topology
+- The repair process uses iterative triangle removal to fix over-shared edges
+- Falls back to full mesh if simplification creates unrepairable non-manifold issues
 
 ### Memory Limits
 
