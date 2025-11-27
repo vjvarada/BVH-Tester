@@ -21,6 +21,23 @@ import { createOffsetMesh } from './offsetMeshProcessor.js';
 import { exportAndDownloadSTL } from './stlExporter.js';
 ```
 
+## Input Format
+
+The module accepts mesh data as a **Float32Array of triangle soup vertices** (flat array format):
+- Format: `[x1, y1, z1, x2, y2, z2, x3, y3, z3, ...]`
+- Each triangle is defined by 9 consecutive values (3 vertices × 3 coordinates)
+- No index buffer required - vertices are duplicated per triangle
+- This is the native format from Three.js `BufferGeometry.attributes.position.array`
+
+**Supported input sources:**
+- ✅ STL files (via Three.js STLLoader)
+- ✅ OBJ files (via Three.js OBJLoader)
+- ✅ GLTF/GLB files (via Three.js GLTFLoader)
+- ✅ Any Three.js BufferGeometry (use `extractVertices()` helper)
+- ✅ Procedurally generated geometry
+
+**Note:** The module works directly with vertex arrays, not with file formats. Use Three.js loaders to convert file formats to BufferGeometry first.
+
 ## Quick Start
 
 ### Simple Usage
@@ -30,9 +47,11 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { createOffsetMesh, extractVertices } from './offsetMeshProcessor.js';
 import { exportAndDownloadSTL } from './stlExporter.js';
 
-// Load STL
+// Load STL file
 const loader = new STLLoader();
 const geometry = loader.parse(arrayBuffer);
+
+// Extract vertices as Float32Array (triangle soup format)
 const vertices = extractVertices(geometry);
 
 // Create offset mesh with optional rotation (returns BufferGeometry)
@@ -88,14 +107,23 @@ This separation allows you to:
 
 ```javascript
 // Create offset mesh (returns Three.js BufferGeometry)
+// Input: Float32Array of triangle soup vertices [x,y,z,x,y,z,...]
 const result = await createOffsetMesh(vertices, options);
 
 // Cleanup resources when done
 cleanup();
 
-// Extract vertices from BufferGeometry
+// Extract vertices from BufferGeometry as Float32Array
+// Output: [x1,y1,z1, x2,y2,z2, ...] - triangle soup format
 const vertices = extractVertices(geometry);
 ```
+
+**Input Requirements:**
+- `vertices` must be a **Float32Array** containing triangle vertices
+- Format: Each triangle = 9 consecutive floats (3 vertices × xyz coordinates)
+- Example: A cube with 12 triangles = Float32Array of length 108 (12 × 9)
+- Vertex ordering determines face normals (right-hand rule)
+- No index buffer - each triangle's vertices are independent
 
 **Options:**
 - `offsetDistance` (required): Offset distance in world units
@@ -263,7 +291,39 @@ const result = await createOffsetMesh(vertices, {
 // Useful for generating support structures or inverted shells
 ```
 
-### Example 2: Batch Processing
+### Example 2: Loading from Different File Formats
+
+```javascript
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { createOffsetMesh, extractVertices } from './offsetMeshProcessor.js';
+
+// From STL file
+const stlLoader = new STLLoader();
+const stlGeometry = stlLoader.parse(stlArrayBuffer);
+const stlVertices = extractVertices(stlGeometry); // Float32Array
+
+// From OBJ file
+const objLoader = new OBJLoader();
+const objGroup = objLoader.parse(objText);
+const objGeometry = objGroup.children[0].geometry;
+const objVertices = extractVertices(objGeometry); // Float32Array
+
+// From GLTF file
+const gltfLoader = new GLTFLoader();
+const gltf = await gltfLoader.loadAsync('model.glb');
+const gltfGeometry = gltf.scene.children[0].geometry;
+const gltfVertices = extractVertices(gltfGeometry); // Float32Array
+
+// All produce the same format: Float32Array triangle soup
+const result = await createOffsetMesh(stlVertices, {
+    offsetDistance: 0.2,
+    pixelsPerUnit: 10
+});
+```
+
+### Example 3: Batch Processing
 
 ```javascript
 async function processBatch(files) {
@@ -272,6 +332,8 @@ async function processBatch(files) {
     for (const file of files) {
         const loader = new STLLoader();
         const geometry = await loadSTL(file);
+        
+        // Extract as Float32Array triangle soup
         const vertices = extractVertices(geometry);
         
         const result = await createOffsetMesh(vertices, {
@@ -290,7 +352,7 @@ async function processBatch(files) {
 }
 ```
 
-### Example 3: Progress Tracking
+### Example 4: Progress Tracking
 
 ```javascript
 const result = await createOffsetMesh(vertices, {
@@ -307,7 +369,7 @@ const result = await createOffsetMesh(vertices, {
 });
 ```
 
-### Example 4: Mesh Simplification Options
+### Example 5: Mesh Simplification Options
 
 ```javascript
 // Default: No simplification
@@ -337,7 +399,7 @@ console.log(`Simplified (safe): ${simplifiedSafe.metadata.triangleCount} triangl
 console.log(`Applied: ${simplifiedSafe.metadata.simplificationApplied}`);
 ```
 
-### Example 5: CSG Operations Before Export
+### Example 6: CSG Operations Before Export
 
 ```javascript
 import { SUBTRACTION } from 'three-bvh-csg';
@@ -403,9 +465,15 @@ Creates an offset mesh from triangle soup vertices. Returns BufferGeometry for f
 **Returns:** Promise<Object> with `{ geometry: THREE.BufferGeometry, metadata: Object }`
 
 #### `extractVertices(geometry)`
-Extract vertices from Three.js BufferGeometry.
+Extract vertices from Three.js BufferGeometry as triangle soup.
 
-**Returns:** Float32Array
+**Parameters:**
+- `geometry` (THREE.BufferGeometry): Input geometry with position attribute
+
+**Returns:** Float32Array in triangle soup format `[x,y,z,x,y,z,...]`
+- Each 9 consecutive values = 1 triangle (3 vertices)
+- Vertices may be duplicated (non-indexed format)
+- Compatible with all Three.js loaders (STL, OBJ, GLTF, etc.)
 
 #### `cleanup()`
 Cleanup GPU resources and caches. Call when done processing.

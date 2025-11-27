@@ -48,6 +48,9 @@ export async function createOffsetMesh(vertices, options) {
     if (pixelsPerUnit <= 0) {
         throw new Error('Pixels per unit must be positive');
     }
+    if (simplifyRatio !== null && (simplifyRatio <= 0 || simplifyRatio >= 1)) {
+        throw new Error('Simplify ratio must be between 0 and 1 (exclusive)');
+    }
     
     const result = {
         heightmapResult: null,
@@ -67,21 +70,24 @@ export async function createOffsetMesh(vertices, options) {
     
     const startTime = performance.now();
     
+    // Pre-calculate rotation parameters
+    const actualYZ = 180 - rotationYZ;
+    const needsRotation = rotationXZ !== 0 || actualYZ !== 0;
+    
     try {
         // Step 0: Apply rotation if needed
         let workingVertices = vertices;
-        let needsRotation = rotationXZ !== 0 || rotationYZ !== 180;  // Check if different from default inverted state
         
         if (needsRotation) {
             if (progressCallback) progressCallback(0, 100, 'Applying rotation');
             
             // Create rotation matrix
-            const rotationMatrix = createRotationMatrix(rotationXZ, rotationYZ, false);
+            const rotationMatrix = createRotationMatrix(rotationXZ, actualYZ);
             
             // Rotate vertices
             workingVertices = applyMatrixToVertices(vertices, rotationMatrix);
             
-            console.log(`Applied rotation: XZ=${rotationXZ}°, YZ=${rotationYZ}° (actual YZ=${180 - rotationYZ}°)`);
+            console.log(`Applied rotation: XZ=${rotationXZ}°, YZ=${rotationYZ}° (actual YZ=${actualYZ}°)`);
         }
         
         // Step 1: Calculate resolution
@@ -228,7 +234,7 @@ export async function createOffsetMesh(vertices, options) {
         if (needsRotation) {
             if (progressCallback) progressCallback(95, 100, 'Restoring orientation');
             
-            const inverseMatrix = createRotationMatrix(rotationXZ, rotationYZ, true);
+            const inverseMatrix = createInverseRotationMatrix(rotationXZ, actualYZ);
             result.geometry.applyMatrix4(inverseMatrix);
             result.geometry.computeVertexNormals();
             
@@ -352,45 +358,60 @@ export function calculateResolution(boundingBox, pixelsPerUnit, offsetDistance) 
 // ============================================
 
 /**
- * Create a rotation matrix from XZ and YZ angles
+ * Create a rotation matrix from XZ and actualYZ angles
  * @param {number} xzAngleDeg - Rotation around Y axis (degrees)
- * @param {number} yzAngleDeg - Rotation around X axis (degrees, inverted: 180-input)
- * @param {boolean} inverse - If true, creates inverse rotation
+ * @param {number} actualYZ - Actual rotation around X axis (degrees, pre-calculated: 180-input)
  * @returns {THREE.Matrix4} Rotation matrix
  */
-function createRotationMatrix(xzAngleDeg, yzAngleDeg, inverse = false) {
+function createRotationMatrix(xzAngleDeg, actualYZ) {
     const matrix = new THREE.Matrix4();
     
-    // Apply YZ inversion (180 - input)
-    const actualYZ = 180 - yzAngleDeg;
+    // Early return if no rotation needed
+    if (xzAngleDeg === 0 && actualYZ === 0) {
+        return matrix; // Identity matrix
+    }
     
-    if (inverse) {
-        // For inverse, apply rotations in reverse order with negative angles
-        // If forward was: Y then X, inverse is: -X then -Y
-        if (actualYZ !== 0) {  // Only skip if actualYZ is 0 (no rotation)
-            const rotX = new THREE.Matrix4();
-            rotX.makeRotationX(-actualYZ * Math.PI / 180);
-            matrix.multiply(rotX);
-        }
-        
-        if (xzAngleDeg !== 0) {
-            const rotY = new THREE.Matrix4();
-            rotY.makeRotationY(-xzAngleDeg * Math.PI / 180);
-            matrix.multiply(rotY);
-        }
-    } else {
-        // Forward rotation: Y axis first (XZ plane), then X axis (YZ plane)
-        if (xzAngleDeg !== 0) {
-            const rotY = new THREE.Matrix4();
-            rotY.makeRotationY(xzAngleDeg * Math.PI / 180);
-            matrix.multiply(rotY);
-        }
-        
-        if (actualYZ !== 0) {  // Only skip if actualYZ is 0 (no rotation)
-            const rotX = new THREE.Matrix4();
-            rotX.makeRotationX(actualYZ * Math.PI / 180);
-            matrix.multiply(rotX);
-        }
+    // Rotation order: Y axis first (XZ plane), then X axis (YZ plane)
+    if (xzAngleDeg !== 0) {
+        const rotY = new THREE.Matrix4();
+        rotY.makeRotationY(xzAngleDeg * Math.PI / 180);
+        matrix.multiply(rotY);
+    }
+    
+    if (actualYZ !== 0) {
+        const rotX = new THREE.Matrix4();
+        rotX.makeRotationX(actualYZ * Math.PI / 180);
+        matrix.multiply(rotX);
+    }
+    
+    return matrix;
+}
+
+/**
+ * Create an inverse rotation matrix
+ * @param {number} xzAngleDeg - Rotation around Y axis (degrees)
+ * @param {number} actualYZ - Actual rotation around X axis (degrees)
+ * @returns {THREE.Matrix4} Inverse rotation matrix
+ */
+function createInverseRotationMatrix(xzAngleDeg, actualYZ) {
+    const matrix = new THREE.Matrix4();
+    
+    // Early return if no rotation needed
+    if (xzAngleDeg === 0 && actualYZ === 0) {
+        return matrix; // Identity matrix
+    }
+    
+    // Inverse rotation: apply in reverse order with negative angles
+    if (actualYZ !== 0) {
+        const rotX = new THREE.Matrix4();
+        rotX.makeRotationX(-actualYZ * Math.PI / 180);
+        matrix.multiply(rotX);
+    }
+    
+    if (xzAngleDeg !== 0) {
+        const rotY = new THREE.Matrix4();
+        rotY.makeRotationY(-xzAngleDeg * Math.PI / 180);
+        matrix.multiply(rotY);
     }
     
     return matrix;
@@ -405,13 +426,25 @@ function createRotationMatrix(xzAngleDeg, yzAngleDeg, inverse = false) {
 function applyMatrixToVertices(vertices, matrix) {
     const result = new Float32Array(vertices.length);
     const vec = new THREE.Vector3();
+    const elements = matrix.elements;
+    
+    // Extract matrix elements for faster access
+    const m11 = elements[0], m12 = elements[4], m13 = elements[8], m14 = elements[12];
+    const m21 = elements[1], m22 = elements[5], m23 = elements[9], m24 = elements[13];
+    const m31 = elements[2], m32 = elements[6], m33 = elements[10], m34 = elements[14];
+    const m41 = elements[3], m42 = elements[7], m43 = elements[11], m44 = elements[15];
     
     for (let i = 0; i < vertices.length; i += 3) {
-        vec.set(vertices[i], vertices[i + 1], vertices[i + 2]);
-        vec.applyMatrix4(matrix);
-        result[i] = vec.x;
-        result[i + 1] = vec.y;
-        result[i + 2] = vec.z;
+        const x = vertices[i];
+        const y = vertices[i + 1];
+        const z = vertices[i + 2];
+        
+        // Manual matrix multiplication for better performance
+        const w = m41 * x + m42 * y + m43 * z + m44 || 1;
+        
+        result[i] = (m11 * x + m12 * y + m13 * z + m14) / w;
+        result[i + 1] = (m21 * x + m22 * y + m23 * z + m24) / w;
+        result[i + 2] = (m31 * x + m32 * y + m33 * z + m34) / w;
     }
     
     return result;

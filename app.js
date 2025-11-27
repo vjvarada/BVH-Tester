@@ -35,9 +35,35 @@ class OffsetGeneratorApp {
         
         this.loadedGeometry = null;
         
+        // Cache DOM elements
+        this.domElements = {};
+        
         this.init();
+        this.cacheDOMElements();
         this.setupEventListeners();
         this.animate();
+    }
+    
+    cacheDOMElements() {
+        this.domElements = {
+            fileInput: document.getElementById('file-input'),
+            generateBtn: document.getElementById('generate-btn'),
+            exportBtn: document.getElementById('export-stl-btn'),
+            offsetDistance: document.getElementById('offset-distance'),
+            pixelsPerUnit: document.getElementById('heightmap-resolution'),
+            rotationXZ: document.getElementById('rotation-xz'),
+            rotationYZ: document.getElementById('rotation-yz'),
+            simplifyMesh: document.getElementById('simplify-mesh'),
+            simplifyRatio: document.getElementById('simplify-ratio'),
+            checkManifold: document.getElementById('check-manifold'),
+            showOriginal: document.getElementById('show-original'),
+            showHeightmap: document.getElementById('show-heightmap'),
+            statusLog: document.getElementById('status-log') || document.getElementById('status'),
+            progressContainer: document.getElementById('progress-container'),
+            progressLabel: document.getElementById('progress-label'),
+            progressBar: document.getElementById('progress-bar-fill'),
+            progressText: document.getElementById('progress-text')
+        };
     }
     
     init() {
@@ -142,17 +168,32 @@ class OffsetGeneratorApp {
     }
     
     setupEventListeners() {
-        document.getElementById('file-input').addEventListener('change', (e) => this.handleFileUpload(e));
-        document.getElementById('generate-btn').addEventListener('click', () => this.generateOffset());
-        document.getElementById('export-stl-btn').addEventListener('click', () => this.exportSTL());
+        const { fileInput, generateBtn, exportBtn, showOriginal, showHeightmap } = this.domElements;
         
-        document.getElementById('show-original').addEventListener('change', (e) => {
+        fileInput?.addEventListener('change', (e) => this.handleFileUpload(e));
+        generateBtn?.addEventListener('click', () => this.generateOffset());
+        exportBtn?.addEventListener('click', () => this.exportSTL());
+        
+        showOriginal?.addEventListener('change', (e) => {
             if (this.originalMesh) this.originalMesh.visible = e.target.checked;
         });
         
-        document.getElementById('show-heightmap').addEventListener('change', (e) => {
+        showHeightmap?.addEventListener('change', (e) => {
             if (this.offsetMesh) this.offsetMesh.visible = e.target.checked;
         });
+    }
+    
+    getNumericInput(element, defaultValue = 0) {
+        const value = parseFloat(element?.value);
+        return isNaN(value) ? defaultValue : value;
+    }
+    
+    validatePositiveNumber(value, name) {
+        if (isNaN(value) || value <= 0) {
+            this.logStatus(`✗ Invalid ${name}`, 'error');
+            return false;
+        }
+        return true;
     }
     
     handleFileUpload(event) {
@@ -216,7 +257,9 @@ class OffsetGeneratorApp {
             const triangleCount = geometry.attributes.position.count / 3;
             this.logStatus(`✓ Loaded: ${file.name} (${triangleCount.toLocaleString()} triangles)`, 'success');
             
-            document.getElementById('generate-btn').disabled = false;
+            if (this.domElements.generateBtn) {
+                this.domElements.generateBtn.disabled = false;
+            }
         };
         
         reader.onerror = () => {
@@ -233,24 +276,21 @@ class OffsetGeneratorApp {
         }
         
         try {
-            // Get parameters from UI
-            const offsetDistance = parseFloat(document.getElementById('offset-distance').value);
-            const pixelsPerUnit = parseFloat(document.getElementById('heightmap-resolution').value);
-            const rotationXZ = parseFloat(document.getElementById('rotation-xz').value) || 0;
-            const rotationYZ = parseFloat(document.getElementById('rotation-yz').value) || 0;
+            // Get parameters from UI using cached elements
+            const { offsetDistance, pixelsPerUnit, rotationXZ, rotationYZ, simplifyMesh, simplifyRatio, checkManifold } = this.domElements;
             
-            if (isNaN(offsetDistance) || offsetDistance <= 0) {
-                this.logStatus('✗ Invalid offset distance', 'error');
-                return;
-            }
-            if (isNaN(pixelsPerUnit) || pixelsPerUnit <= 0) {
-                this.logStatus('✗ Invalid pixels per unit', 'error');
-                return;
-            }
+            const offsetDist = this.getNumericInput(offsetDistance, 0.2);
+            const pixelsUnit = this.getNumericInput(pixelsPerUnit, 10);
+            const rotXZ = this.getNumericInput(rotationXZ, 0);
+            const rotYZ = this.getNumericInput(rotationYZ, 0);
+            
+            // Validate inputs
+            if (!this.validatePositiveNumber(offsetDist, 'offset distance')) return;
+            if (!this.validatePositiveNumber(pixelsUnit, 'pixels per unit')) return;
             
             this.logStatus('Generating offset mesh...', 'info');
-            if (rotationXZ !== 0 || rotationYZ !== 0) {
-                this.logStatus(`Projection angle: XZ=${rotationXZ}°, YZ=${rotationYZ}°`, 'info');
+            if (rotXZ !== 0 || rotYZ !== 0) {
+                this.logStatus(`Projection angle: XZ=${rotXZ}°, YZ=${rotYZ}°`, 'info');
             }
             this.showProgress('Initializing...');
             
@@ -258,28 +298,25 @@ class OffsetGeneratorApp {
             const vertices = extractVertices(this.loadedGeometry);
             
             // Get simplification settings
-            const simplifyCheckbox = document.getElementById('simplify-mesh');
-            const simplifyMesh = simplifyCheckbox?.checked || false;
-            const simplifyRatio = simplifyMesh ? parseFloat(document.getElementById('simplify-ratio')?.value || 0.5) : null;
+            const enableSimplify = simplifyMesh?.checked || false;
+            const ratio = enableSimplify ? this.getNumericInput(simplifyRatio, 0.5) : null;
+            const verifyManifold = checkManifold?.checked || false;
             
-            // Get manifold verification setting
-            const verifyManifold = document.getElementById('check-manifold')?.checked || false;
-            
-            this.logStatus(`Mesh simplification: ${simplifyMesh ? `ENABLED (${(simplifyRatio * 100).toFixed(0)}%)` : 'DISABLED'}`, 'info');
-            if (simplifyMesh && verifyManifold) {
+            this.logStatus(`Mesh simplification: ${enableSimplify ? `ENABLED (${(ratio * 100).toFixed(0)}%)` : 'DISABLED'}`, 'info');
+            if (enableSimplify && verifyManifold) {
                 this.logStatus('Manifold verification: ENABLED (will fallback to full mesh if needed)', 'info');
-            } else if (simplifyMesh && !verifyManifold) {
+            } else if (enableSimplify && !verifyManifold) {
                 this.logStatus('Manifold verification: DISABLED (will use simplified mesh as-is)', 'info');
             }
             
             // Create offset mesh using modular processor (rotation handled internally)
             const result = await createOffsetMesh(vertices, {
-                offsetDistance,
-                pixelsPerUnit,
-                simplifyRatio,
+                offsetDistance: offsetDist,
+                pixelsPerUnit: pixelsUnit,
+                simplifyRatio: ratio,
                 verifyManifold,
-                rotationXZ,
-                rotationYZ,
+                rotationXZ: rotXZ,
+                rotationYZ: rotYZ,
                 tileSize: 2048,
                 progressCallback: (percent, total, stage) => {
                     this.updateProgress(percent, percent, 100);
@@ -301,7 +338,7 @@ class OffsetGeneratorApp {
                     'success'
                 );
                 this.logStatus(`⏱ Simplification time: ${metadata.simplificationTime.toFixed(0)}ms`, 'info');
-            } else if (simplifyMesh) {
+            } else if (enableSimplify) {
                 this.logStatus('Mesh simplification not applied (check console for details)', 'info');
             }
             
@@ -325,7 +362,7 @@ class OffsetGeneratorApp {
             });
             
             this.offsetMesh = new THREE.Mesh(finalGeometry, material);
-            this.offsetMesh.visible = document.getElementById('show-heightmap').checked;
+            this.offsetMesh.visible = this.domElements.showHeightmap?.checked ?? true;
             this.scene.add(this.offsetMesh);
             
             // Log results with actual final geometry counts
@@ -343,8 +380,7 @@ class OffsetGeneratorApp {
             );
             
             // Optional manifold check
-            const performManifoldCheck = document.getElementById('check-manifold')?.checked || false;
-            if (performManifoldCheck) {
+            if (verifyManifold) {
                 this.logStatus('Performing manifold check...', 'info');
                 const manifoldStartTime = performance.now();
                 const verification = verifyWatertightness(finalGeometry);
@@ -359,7 +395,9 @@ class OffsetGeneratorApp {
             }
             
             // Enable export button
-            document.getElementById('export-stl-btn').disabled = false;
+            if (this.domElements.exportBtn) {
+                this.domElements.exportBtn.disabled = false;
+            }
             
         } catch (error) {
             this.hideProgress();
@@ -430,12 +468,10 @@ class OffsetGeneratorApp {
     // ============================================
     
     logStatus(message, type = 'info') {
-        // Try both 'status-log' and 'status' for backwards compatibility
-        const statusLog = document.getElementById('status-log') || document.getElementById('status');
-        
         // Always log to console
         console.log(`[${type.toUpperCase()}] ${message}`);
         
+        const { statusLog } = this.domElements;
         if (!statusLog) {
             console.warn('Status log element not found in DOM');
             return;
@@ -450,31 +486,28 @@ class OffsetGeneratorApp {
     }
     
     showProgress(label = 'Processing...') {
-        const progressContainer = document.getElementById('progress-container');
-        const progressLabel = document.getElementById('progress-label');
+        const { progressContainer, progressLabel } = this.domElements;
         if (progressContainer) progressContainer.style.display = 'block';
         if (progressLabel) progressLabel.textContent = label;
     }
     
     updateProgress(percent, current = null, total = null) {
-        const progressBar = document.getElementById('progress-bar');
-        const progressText = document.getElementById('progress-text');
+        const { progressBar, progressText } = this.domElements;
+        const clampedPercent = Math.min(100, Math.max(0, percent));
         
         if (progressBar) {
-            progressBar.style.width = `${Math.min(100, Math.max(0, percent))}%`;
+            progressBar.style.width = `${clampedPercent}%`;
         }
         
         if (progressText) {
-            if (current !== null && total !== null) {
-                progressText.textContent = `${Math.floor(percent)}% (${current}/${total})`;
-            } else {
-                progressText.textContent = `${Math.floor(percent)}%`;
-            }
+            progressText.textContent = current !== null && total !== null 
+                ? `${Math.floor(clampedPercent)}% (${current}/${total})`
+                : `${Math.floor(clampedPercent)}%`;
         }
     }
     
     hideProgress() {
-        const progressContainer = document.getElementById('progress-container');
+        const { progressContainer } = this.domElements;
         if (progressContainer) progressContainer.style.display = 'none';
     }
     
