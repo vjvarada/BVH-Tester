@@ -7,6 +7,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import Stats from 'three/addons/libs/stats.module.js';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+import { MeshoptSimplifier } from './node_modules/meshoptimizer/meshopt_simplifier.module.js';
 
 // Import modular offset mesh processor
 import { createOffsetMesh, extractVertices, cleanup } from './offsetMeshProcessor.js';
@@ -265,6 +266,43 @@ class OffsetGeneratorApp {
             
             this.hideProgress();
             
+            // Get metadata first
+            const { metadata } = result;
+            const originalTriangleCount = metadata.triangleCount;
+            
+            // Optional mesh simplification
+            const simplifyCheckbox = document.getElementById('simplify-mesh');
+            const simplifyMesh = simplifyCheckbox?.checked || false;
+            let finalGeometry = result.geometry;
+            
+            this.logStatus(`Mesh simplification checkbox: ${simplifyMesh ? 'ENABLED' : 'DISABLED'}`, 'info');
+            
+            if (simplifyMesh) {
+                const targetRatio = parseFloat(document.getElementById('simplify-ratio')?.value || 0.5);
+                this.logStatus(`Starting mesh simplification (target ratio: ${(targetRatio * 100).toFixed(0)}%)...`, 'info');
+                const simplifyStartTime = performance.now();
+                
+                try {
+                    this.logStatus(`Original mesh: ${originalTriangleCount.toLocaleString()} triangles`, 'info');
+                    finalGeometry = await this.simplifyGeometry(result.geometry, targetRatio);
+                    const simplifyTime = performance.now() - simplifyStartTime;
+                    const newTriangleCount = finalGeometry.index.count / 3;
+                    const reduction = ((1 - newTriangleCount / originalTriangleCount) * 100).toFixed(1);
+                    
+                    this.logStatus(
+                        `✓ Mesh simplified: ${originalTriangleCount.toLocaleString()} → ${newTriangleCount.toLocaleString()} triangles (${reduction}% reduction)`,
+                        'success'
+                    );
+                    this.logStatus(`⏱ Simplification time: ${simplifyTime.toFixed(0)}ms`, 'info');
+                } catch (error) {
+                    this.logStatus(`✗ Simplification failed: ${error.message}`, 'error');
+                    console.error('Simplification error:', error);
+                    finalGeometry = result.geometry;
+                }
+            } else {
+                this.logStatus('Mesh simplification skipped (checkbox not enabled)', 'info');
+            }
+            
             // Remove previous offset mesh
             if (this.offsetMesh) {
                 this.scene.remove(this.offsetMesh);
@@ -284,15 +322,17 @@ class OffsetGeneratorApp {
                 roughness: 0.8
             });
             
-            this.offsetMesh = new THREE.Mesh(result.geometry, material);
+            this.offsetMesh = new THREE.Mesh(finalGeometry, material);
             this.offsetMesh.visible = document.getElementById('show-heightmap').checked;
             this.scene.add(this.offsetMesh);
             
-            // Log results
-            const { metadata } = result;
+            // Log results with actual final geometry counts
+            const finalVertexCount = finalGeometry.getAttribute('position').count;
+            const finalTriangleCount = finalGeometry.index.count / 3;
+            
             this.logStatus(
-                `✓ Offset mesh created: ${metadata.vertexCount.toLocaleString()} vertices, ` +
-                `${metadata.triangleCount.toLocaleString()} triangles`,
+                `✓ Offset mesh created: ${finalVertexCount.toLocaleString()} vertices, ` +
+                `${finalTriangleCount.toLocaleString()} triangles`,
                 'success'
             );
             this.logStatus(
@@ -305,7 +345,7 @@ class OffsetGeneratorApp {
             if (performManifoldCheck) {
                 this.logStatus('Performing manifold check...', 'info');
                 const manifoldStartTime = performance.now();
-                const verification = verifyWatertightness(result.geometry);
+                const verification = verifyWatertightness(finalGeometry);
                 const manifoldTime = performance.now() - manifoldStartTime;
                 
                 if (verification.isWatertight) {
@@ -324,6 +364,56 @@ class OffsetGeneratorApp {
             this.logStatus(`✗ Error generating offset: ${error.message}`, 'error');
             console.error('Offset generation error:', error);
         }
+    }
+    
+    async simplifyGeometry(geometry, targetRatio) {
+        // Wait for meshoptimizer to be ready
+        await MeshoptSimplifier.ready;
+        
+        // Extract mesh data
+        const positions = geometry.attributes.position.array;
+        const indices = geometry.index.array;
+        
+        // Validate input
+        if (!indices || indices.length === 0) {
+            throw new Error('Geometry has no indices');
+        }
+        if (!positions || positions.length === 0) {
+            throw new Error('Geometry has no positions');
+        }
+        
+        // Convert to Uint32Array and Float32Array if needed
+        const uint32Indices = indices instanceof Uint32Array ? indices : new Uint32Array(indices);
+        const float32Positions = positions instanceof Float32Array ? positions : new Float32Array(positions);
+        
+        // Calculate target index count with minimum threshold
+        // meshoptimizer requires at least 3 indices (1 triangle)
+        const minIndexCount = 3;
+        const targetIndexCount = Math.max(minIndexCount, Math.floor(uint32Indices.length * targetRatio));
+        
+        // Ensure target is divisible by 3 (triangles)
+        const adjustedTargetIndexCount = Math.floor(targetIndexCount / 3) * 3;
+        
+        this.logStatus(`Simplifying: ${uint32Indices.length} → ${adjustedTargetIndexCount} indices (target ratio: ${targetRatio})`, 'info');
+        
+        // Simplify using meshoptimizer
+        const [simplifiedIndices, error] = MeshoptSimplifier.simplify(
+            uint32Indices,
+            float32Positions,
+            3, // stride (xyz)
+            adjustedTargetIndexCount,
+            0.01 // target error
+        );
+        
+        this.logStatus(`Simplification result: ${simplifiedIndices.length} indices, error: ${error.toFixed(6)}`, 'info');
+        
+        // Create new geometry with simplified indices
+        const simplifiedGeometry = new THREE.BufferGeometry();
+        simplifiedGeometry.setAttribute('position', geometry.attributes.position.clone());
+        simplifiedGeometry.setIndex(Array.from(simplifiedIndices));
+        simplifiedGeometry.computeVertexNormals();
+        
+        return simplifiedGeometry;
     }
     
     async exportSTL() {
@@ -388,17 +478,23 @@ class OffsetGeneratorApp {
     // ============================================
     
     logStatus(message, type = 'info') {
-        const statusLog = document.getElementById('status-log');
-        if (!statusLog) return;
+        // Try both 'status-log' and 'status' for backwards compatibility
+        const statusLog = document.getElementById('status-log') || document.getElementById('status');
+        
+        // Always log to console
+        console.log(`[${type.toUpperCase()}] ${message}`);
+        
+        if (!statusLog) {
+            console.warn('Status log element not found in DOM');
+            return;
+        }
         
         const entry = document.createElement('div');
-        entry.className = `status-entry status-${type}`;
+        entry.className = `log-entry log-${type}`;
         entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
         
         statusLog.appendChild(entry);
         statusLog.scrollTop = statusLog.scrollHeight;
-        
-        console.log(`[${type.toUpperCase()}] ${message}`);
     }
     
     showProgress(label = 'Processing...') {
