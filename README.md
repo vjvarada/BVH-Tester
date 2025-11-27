@@ -12,6 +12,7 @@ A modular, reusable library for creating GPU-accelerated offset meshes from STL 
 - 🎯 **Mesh Simplification** - Optional mesh simplification with manifold repair
 - 📊 **Progress Tracking** - Built-in progress callbacks
 - 🎯 **Adaptive Resolution** - Automatic sizing based on model dimensions
+- 🔄 **Rotatable Projection** - Change heightmap projection angle via XZ and YZ rotation
 
 ## Installation
 
@@ -28,10 +29,40 @@ import { exportAndDownloadSTL } from './stlExporter.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { createOffsetMesh, extractVertices } from './offsetMeshProcessor.js';
 import { exportAndDownloadSTL } from './stlExporter.js';
+import * as THREE from 'three';
 
 // Load STL
 const loader = new STLLoader();
 const geometry = loader.parse(arrayBuffer);
+
+// Optional: Rotate the geometry to change projection angle
+const rotationXZ = 45;  // Rotation around Y axis (degrees)
+const rotationYZ = 30;  // Rotation around X axis (degrees, inverted: 180 - input)
+
+if (rotationXZ !== 0 || rotationYZ !== 0) {
+    const matrix = new THREE.Matrix4();
+    
+    // Apply XZ rotation (around Y axis)
+    if (rotationXZ !== 0) {
+        const rotY = new THREE.Matrix4();
+        rotY.makeRotationY(rotationXZ * Math.PI / 180);
+        matrix.multiply(rotY);
+    }
+    
+    // Apply YZ rotation (around X axis, inverted)
+    if (rotationYZ !== 0) {
+        const actualYZ = 180 - rotationYZ;  // Invert for opposite projection
+        const rotX = new THREE.Matrix4();
+        rotX.makeRotationX(actualYZ * Math.PI / 180);
+        matrix.multiply(rotX);
+    }
+    
+    geometry.applyMatrix4(matrix);
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+}
+
+// Extract vertices from the (possibly rotated) geometry
 const vertices = extractVertices(geometry);
 
 // Create offset mesh (returns BufferGeometry)
@@ -44,6 +75,28 @@ const result = await createOffsetMesh(vertices, {
 
 console.log(`Created mesh: ${result.metadata.triangleCount} triangles`);
 console.log(`Simplified: ${result.metadata.simplificationApplied}`);
+
+// Rotate back to original orientation
+if (rotationXZ !== 0 || rotationYZ !== 0) {
+    const inverseMatrix = new THREE.Matrix4();
+    
+    // Apply inverse rotations in reverse order
+    if (rotationYZ !== 0) {
+        const actualYZ = 180 - rotationYZ;
+        const rotX = new THREE.Matrix4();
+        rotX.makeRotationX(-actualYZ * Math.PI / 180);
+        inverseMatrix.multiply(rotX);
+    }
+    
+    if (rotationXZ !== 0) {
+        const rotY = new THREE.Matrix4();
+        rotY.makeRotationY(-rotationXZ * Math.PI / 180);
+        inverseMatrix.multiply(rotY);
+    }
+    
+    result.geometry.applyMatrix4(inverseMatrix);
+    result.geometry.computeVertexNormals();
+}
 
 // Export to STL when ready (application layer responsibility)
 const exportInfo = exportAndDownloadSTL(result.geometry, 'offset.stl');
@@ -197,6 +250,58 @@ import { exportAndDownloadSTL } from './stlExporter.js';
 exportAndDownloadSTL(result.geometry, 'exported.stl');
 
 // Cleanup
+cleanup();
+```
+
+### Example 1b: Rotated Projection Angle
+
+```javascript
+import * as THREE from 'three';
+import { createOffsetMesh, extractVertices, cleanup } from './offsetMeshProcessor.js';
+
+// Load and rotate geometry to change projection angle
+const geometry = loadedGeometry.clone();
+
+// Rotate 45° around Y axis (XZ plane) and 30° around X axis (YZ plane, inverted)
+const rotationXZ = 45;
+const rotationYZ = 30;
+
+const rotMatrix = new THREE.Matrix4();
+rotMatrix.makeRotationY(rotationXZ * Math.PI / 180);
+
+const rotMatrixX = new THREE.Matrix4();
+const actualYZ = 180 - rotationYZ;  // Invert YZ for opposite projection
+rotMatrixX.makeRotationX(actualYZ * Math.PI / 180);
+rotMatrix.multiply(rotMatrixX);
+
+geometry.applyMatrix4(rotMatrix);
+geometry.computeVertexNormals();
+geometry.computeBoundingBox();
+
+// Create offset mesh from rotated geometry
+const vertices = extractVertices(geometry);
+const result = await createOffsetMesh(vertices, {
+    offsetDistance: 0.2,
+    pixelsPerUnit: 10
+});
+
+// Rotate back for display
+const inverseMatrix = new THREE.Matrix4();
+const invX = new THREE.Matrix4();
+invX.makeRotationX(-actualYZ * Math.PI / 180);
+inverseMatrix.multiply(invX);
+
+const invY = new THREE.Matrix4();
+invY.makeRotationY(-rotationXZ * Math.PI / 180);
+inverseMatrix.multiply(invY);
+
+result.geometry.applyMatrix4(inverseMatrix);
+result.geometry.computeVertexNormals();
+
+// Add to scene
+const mesh = new THREE.Mesh(result.geometry, material);
+scene.add(mesh);
+
 cleanup();
 ```
 
