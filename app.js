@@ -35,10 +35,6 @@ class OffsetGeneratorApp {
         
         this.loadedGeometry = null;
         
-        // Store rotation state for offsetMesh
-        this.offsetRotationXZ = 0;
-        this.offsetRotationYZ = 0;
-        
         this.init();
         this.setupEventListeners();
         this.animate();
@@ -230,48 +226,6 @@ class OffsetGeneratorApp {
         reader.readAsArrayBuffer(file);
     }
     
-    /**
-     * Create a rotation matrix from XZ and YZ angles
-     * @param {number} xzAngleDeg - Rotation around Y axis (degrees)
-     * @param {number} yzAngleDeg - Rotation around X axis (degrees)
-     * @param {boolean} inverse - If true, creates inverse rotation
-     * @returns {THREE.Matrix4} Rotation matrix
-     */
-    createRotationMatrix(xzAngleDeg, yzAngleDeg, inverse = false) {
-        const matrix = new THREE.Matrix4();
-        
-        if (inverse) {
-            // For inverse, apply rotations in reverse order with negative angles
-            // If forward was: Y then X, inverse is: -X then -Y
-            if (yzAngleDeg !== 0) {
-                const rotX = new THREE.Matrix4();
-                rotX.makeRotationX(-yzAngleDeg * Math.PI / 180);
-                matrix.multiply(rotX);
-            }
-            
-            if (xzAngleDeg !== 0) {
-                const rotY = new THREE.Matrix4();
-                rotY.makeRotationY(-xzAngleDeg * Math.PI / 180);
-                matrix.multiply(rotY);
-            }
-        } else {
-            // Forward rotation: Y axis first (XZ plane), then X axis (YZ plane)
-            if (xzAngleDeg !== 0) {
-                const rotY = new THREE.Matrix4();
-                rotY.makeRotationY(xzAngleDeg * Math.PI / 180);
-                matrix.multiply(rotY);
-            }
-            
-            if (yzAngleDeg !== 0) {
-                const rotX = new THREE.Matrix4();
-                rotX.makeRotationX(yzAngleDeg * Math.PI / 180);
-                matrix.multiply(rotX);
-            }
-        }
-        
-        return matrix;
-    }
-    
     async generateOffset() {
         if (!this.loadedGeometry) {
             this.logStatus('✗ No geometry loaded', 'error');
@@ -283,7 +237,7 @@ class OffsetGeneratorApp {
             const offsetDistance = parseFloat(document.getElementById('offset-distance').value);
             const pixelsPerUnit = parseFloat(document.getElementById('heightmap-resolution').value);
             const rotationXZ = parseFloat(document.getElementById('rotation-xz').value) || 0;
-            const rotationYZ = 180 - (parseFloat(document.getElementById('rotation-yz').value) || 0);
+            const rotationYZ = parseFloat(document.getElementById('rotation-yz').value) || 0;
             
             if (isNaN(offsetDistance) || offsetDistance <= 0) {
                 this.logStatus('✗ Invalid offset distance', 'error');
@@ -296,32 +250,12 @@ class OffsetGeneratorApp {
             
             this.logStatus('Generating offset mesh...', 'info');
             if (rotationXZ !== 0 || rotationYZ !== 0) {
-                this.logStatus(`Applying rotation: XZ=${rotationXZ}°, YZ=${rotationYZ}°`, 'info');
+                this.logStatus(`Projection angle: XZ=${rotationXZ}°, YZ=${rotationYZ}°`, 'info');
             }
             this.showProgress('Initializing...');
             
-            // Create a temporary rotated geometry for processing
-            const workingGeometry = this.loadedGeometry.clone();
-            
-            // Apply rotation to the geometry if needed
-            if (rotationXZ !== 0 || rotationYZ !== 0) {
-                const rotationMatrix = this.createRotationMatrix(rotationXZ, rotationYZ);
-                workingGeometry.applyMatrix4(rotationMatrix);
-                workingGeometry.computeVertexNormals();
-                workingGeometry.computeBoundingBox();
-                
-                const box = workingGeometry.boundingBox;
-                const size = new THREE.Vector3();
-                box.getSize(size);
-                this.logStatus(`Rotated bounding box: ${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)}`, 'info');
-            }
-            
-            // Extract vertices from the rotated geometry
-            const vertices = extractVertices(workingGeometry);
-            
-            // Store rotation angles for later reverse rotation
-            this.offsetRotationXZ = rotationXZ;
-            this.offsetRotationYZ = rotationYZ;
+            // Extract vertices from the original geometry
+            const vertices = extractVertices(this.loadedGeometry);
             
             // Get simplification settings
             const simplifyCheckbox = document.getElementById('simplify-mesh');
@@ -338,12 +272,14 @@ class OffsetGeneratorApp {
                 this.logStatus('Manifold verification: DISABLED (will use simplified mesh as-is)', 'info');
             }
             
-            // Create offset mesh using modular processor (with optional simplification)
+            // Create offset mesh using modular processor (rotation handled internally)
             const result = await createOffsetMesh(vertices, {
                 offsetDistance,
                 pixelsPerUnit,
                 simplifyRatio,
                 verifyManifold,
+                rotationXZ,
+                rotationYZ,
                 tileSize: 2048,
                 progressCallback: (percent, total, stage) => {
                     this.updateProgress(percent, percent, 100);
@@ -357,9 +293,6 @@ class OffsetGeneratorApp {
             const { metadata } = result;
             const finalGeometry = result.geometry;
             
-            // Dispose of working geometry
-            workingGeometry.dispose();
-            
             // Log simplification results if applied
             if (metadata.simplificationApplied) {
                 const reduction = ((1 - metadata.triangleCount / metadata.originalTriangleCount) * 100).toFixed(1);
@@ -370,14 +303,6 @@ class OffsetGeneratorApp {
                 this.logStatus(`⏱ Simplification time: ${metadata.simplificationTime.toFixed(0)}ms`, 'info');
             } else if (simplifyMesh) {
                 this.logStatus('Mesh simplification not applied (check console for details)', 'info');
-            }
-            
-            // Apply inverse rotation to bring mesh back to original orientation
-            if (rotationXZ !== 0 || rotationYZ !== 0) {
-                this.logStatus('Rotating mesh back to original orientation...', 'info');
-                const inverseMatrix = this.createRotationMatrix(rotationXZ, rotationYZ, true);
-                finalGeometry.applyMatrix4(inverseMatrix);
-                finalGeometry.computeVertexNormals();
             }
             
             // Remove previous offset mesh

@@ -21,6 +21,8 @@ import { MeshoptSimplifier } from './node_modules/meshoptimizer/meshopt_simplifi
  * @param {number} [options.tileSize=2048] - Tile size for large heightmaps
  * @param {number} [options.simplifyRatio=null] - Simplification ratio (0.1-1.0), null to disable
  * @param {boolean} [options.verifyManifold=true] - Verify manifold and repair/fallback if needed
+ * @param {number} [options.rotationXZ=0] - Rotation around Y axis in degrees (XZ plane)
+ * @param {number} [options.rotationYZ=0] - Rotation around X axis in degrees (YZ plane, inverted: 180-input)
  * @param {Function} [options.progressCallback] - Progress callback (current, total, stage)
  * @returns {Promise<Object>} Result with geometry and metadata
  */
@@ -31,6 +33,8 @@ export async function createOffsetMesh(vertices, options) {
         tileSize = 2048,
         simplifyRatio = null,
         verifyManifold = true,
+        rotationXZ = 0,
+        rotationYZ = 0,
         progressCallback = null
     } = options;
     
@@ -64,11 +68,27 @@ export async function createOffsetMesh(vertices, options) {
     const startTime = performance.now();
     
     try {
+        // Step 0: Apply rotation if needed
+        let workingVertices = vertices;
+        let needsRotation = rotationXZ !== 0 || rotationYZ !== 180;  // Check if different from default inverted state
+        
+        if (needsRotation) {
+            if (progressCallback) progressCallback(0, 100, 'Applying rotation');
+            
+            // Create rotation matrix
+            const rotationMatrix = createRotationMatrix(rotationXZ, rotationYZ, false);
+            
+            // Rotate vertices
+            workingVertices = applyMatrixToVertices(vertices, rotationMatrix);
+            
+            console.log(`Applied rotation: XZ=${rotationXZ}°, YZ=${rotationYZ}° (actual YZ=${180 - rotationYZ}°)`);
+        }
+        
         // Step 1: Calculate resolution
         if (progressCallback) progressCallback(0, 100, 'Calculating resolution');
         
         const box = new THREE.Box3();
-        box.setFromArray(vertices);
+        box.setFromArray(workingVertices);
         const size = new THREE.Vector3();
         box.getSize(size);
         const maxDim = Math.max(size.x, size.y, size.z);
@@ -90,7 +110,7 @@ export async function createOffsetMesh(vertices, options) {
         } : null;
         
         const heightmapResult = await createOffsetHeightMap(
-            vertices, 
+            workingVertices, 
             offsetDistance, 
             clampedResolution, 
             tileSize, 
@@ -204,6 +224,17 @@ export async function createOffsetMesh(vertices, options) {
             }
         }
         
+        // Apply inverse rotation to restore original orientation
+        if (needsRotation) {
+            if (progressCallback) progressCallback(95, 100, 'Restoring orientation');
+            
+            const inverseMatrix = createRotationMatrix(rotationXZ, rotationYZ, true);
+            result.geometry.applyMatrix4(inverseMatrix);
+            result.geometry.computeVertexNormals();
+            
+            console.log('Restored original orientation');
+        }
+        
         result.metadata.vertexCount = result.geometry.getAttribute('position').count;
         result.metadata.triangleCount = result.geometry.index.count / 3;
         
@@ -314,4 +345,74 @@ export function calculateResolution(boundingBox, pixelsPerUnit, offsetDistance) 
     const effectiveDim = maxDim + (offsetDistance * 10);
     const resolution = Math.ceil(effectiveDim * pixelsPerUnit);
     return Math.max(64, Math.min(16384, resolution));
+}
+
+// ============================================
+// Rotation Helper Functions
+// ============================================
+
+/**
+ * Create a rotation matrix from XZ and YZ angles
+ * @param {number} xzAngleDeg - Rotation around Y axis (degrees)
+ * @param {number} yzAngleDeg - Rotation around X axis (degrees, inverted: 180-input)
+ * @param {boolean} inverse - If true, creates inverse rotation
+ * @returns {THREE.Matrix4} Rotation matrix
+ */
+function createRotationMatrix(xzAngleDeg, yzAngleDeg, inverse = false) {
+    const matrix = new THREE.Matrix4();
+    
+    // Apply YZ inversion (180 - input)
+    const actualYZ = 180 - yzAngleDeg;
+    
+    if (inverse) {
+        // For inverse, apply rotations in reverse order with negative angles
+        // If forward was: Y then X, inverse is: -X then -Y
+        if (actualYZ !== 0) {  // Only skip if actualYZ is 0 (no rotation)
+            const rotX = new THREE.Matrix4();
+            rotX.makeRotationX(-actualYZ * Math.PI / 180);
+            matrix.multiply(rotX);
+        }
+        
+        if (xzAngleDeg !== 0) {
+            const rotY = new THREE.Matrix4();
+            rotY.makeRotationY(-xzAngleDeg * Math.PI / 180);
+            matrix.multiply(rotY);
+        }
+    } else {
+        // Forward rotation: Y axis first (XZ plane), then X axis (YZ plane)
+        if (xzAngleDeg !== 0) {
+            const rotY = new THREE.Matrix4();
+            rotY.makeRotationY(xzAngleDeg * Math.PI / 180);
+            matrix.multiply(rotY);
+        }
+        
+        if (actualYZ !== 0) {  // Only skip if actualYZ is 0 (no rotation)
+            const rotX = new THREE.Matrix4();
+            rotX.makeRotationX(actualYZ * Math.PI / 180);
+            matrix.multiply(rotX);
+        }
+    }
+    
+    return matrix;
+}
+
+/**
+ * Apply a transformation matrix to vertices
+ * @param {Float32Array} vertices - Input vertices
+ * @param {THREE.Matrix4} matrix - Transformation matrix
+ * @returns {Float32Array} Transformed vertices
+ */
+function applyMatrixToVertices(vertices, matrix) {
+    const result = new Float32Array(vertices.length);
+    const vec = new THREE.Vector3();
+    
+    for (let i = 0; i < vertices.length; i += 3) {
+        vec.set(vertices[i], vertices[i + 1], vertices[i + 2]);
+        vec.applyMatrix4(matrix);
+        result[i] = vec.x;
+        result[i + 1] = vec.y;
+        result[i + 2] = vec.z;
+    }
+    
+    return result;
 }

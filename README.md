@@ -29,79 +29,38 @@ import { exportAndDownloadSTL } from './stlExporter.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { createOffsetMesh, extractVertices } from './offsetMeshProcessor.js';
 import { exportAndDownloadSTL } from './stlExporter.js';
-import * as THREE from 'three';
 
 // Load STL
 const loader = new STLLoader();
 const geometry = loader.parse(arrayBuffer);
-
-// Optional: Rotate the geometry to change projection angle
-const rotationXZ = 45;  // Rotation around Y axis (degrees)
-const rotationYZ = 30;  // Rotation around X axis (degrees, inverted: 180 - input)
-
-if (rotationXZ !== 0 || rotationYZ !== 0) {
-    const matrix = new THREE.Matrix4();
-    
-    // Apply XZ rotation (around Y axis)
-    if (rotationXZ !== 0) {
-        const rotY = new THREE.Matrix4();
-        rotY.makeRotationY(rotationXZ * Math.PI / 180);
-        matrix.multiply(rotY);
-    }
-    
-    // Apply YZ rotation (around X axis, inverted)
-    if (rotationYZ !== 0) {
-        const actualYZ = 180 - rotationYZ;  // Invert for opposite projection
-        const rotX = new THREE.Matrix4();
-        rotX.makeRotationX(actualYZ * Math.PI / 180);
-        matrix.multiply(rotX);
-    }
-    
-    geometry.applyMatrix4(matrix);
-    geometry.computeVertexNormals();
-    geometry.computeBoundingBox();
-}
-
-// Extract vertices from the (possibly rotated) geometry
 const vertices = extractVertices(geometry);
 
-// Create offset mesh (returns BufferGeometry)
+// Create offset mesh with optional rotation (returns BufferGeometry)
 const result = await createOffsetMesh(vertices, {
     offsetDistance: 0.2,        // Offset amount in world units
     pixelsPerUnit: 10,          // Resolution (higher = more detail)
     simplifyRatio: 0.5,         // Optional: simplify to 50% of triangles
-    verifyManifold: true        // Optional: verify and repair manifold issues
+    verifyManifold: true,       // Optional: verify and repair manifold issues
+    rotationXZ: 0,              // Optional: Rotation around Y axis (degrees)
+    rotationYZ: 0               // Optional: Rotation around X axis (degrees, inverted: 180-input)
 });
 
 console.log(`Created mesh: ${result.metadata.triangleCount} triangles`);
 console.log(`Simplified: ${result.metadata.simplificationApplied}`);
 
-// Rotate back to original orientation
-if (rotationXZ !== 0 || rotationYZ !== 0) {
-    const inverseMatrix = new THREE.Matrix4();
-    
-    // Apply inverse rotations in reverse order
-    if (rotationYZ !== 0) {
-        const actualYZ = 180 - rotationYZ;
-        const rotX = new THREE.Matrix4();
-        rotX.makeRotationX(-actualYZ * Math.PI / 180);
-        inverseMatrix.multiply(rotX);
-    }
-    
-    if (rotationXZ !== 0) {
-        const rotY = new THREE.Matrix4();
-        rotY.makeRotationY(-rotationXZ * Math.PI / 180);
-        inverseMatrix.multiply(rotY);
-    }
-    
-    result.geometry.applyMatrix4(inverseMatrix);
-    result.geometry.computeVertexNormals();
-}
-
-// Export to STL when ready (application layer responsibility)
+// Export to STL
 const exportInfo = exportAndDownloadSTL(result.geometry, 'offset.stl');
 console.log(`Exported: ${exportInfo.filename}, Size: ${exportInfo.size} bytes`);
 ```
+
+**Rotation Parameters:**
+- `rotationXZ`: Rotates around Y axis (XZ plane) - uses input angle directly
+- `rotationYZ`: Rotates around X axis (YZ plane) - **automatically inverted** (180° - input) for opposite projection
+  - Input `0°` → actual rotation `180°` (inverted mesh)
+  - Input `90°` → actual rotation `90°`
+  - Input `180°` → actual rotation `0°` (no rotation)
+
+The module handles rotation internally - vertices are rotated before heightmap generation and the final mesh is rotated back to the original orientation for visualization.
 
 ## Architecture
 
@@ -148,6 +107,12 @@ const vertices = extractVertices(geometry);
 - `verifyManifold` (optional): Verify and repair manifold issues (default: true)
   - `true` = Verify simplified mesh is manifold, repair if needed, fallback to full mesh if repair fails
   - `false` = Use simplified mesh as-is without verification
+- `rotationXZ` (optional): Rotation around Y axis in degrees (default: 0)
+  - Rotates in XZ plane, uses input angle directly
+- `rotationYZ` (optional): Rotation around X axis in degrees (default: 0)
+  - Rotates in YZ plane, **automatically inverted** (180° - input) for opposite projection
+  - Input `0°` creates inverted mesh (actual 180° rotation)
+  - Input `180°` creates no rotation (actual 0° rotation)
 - `tileSize` (optional): Tile size for large heightmaps (default: 2048)
 - `progressCallback` (optional): Function `(current, total, stage) => {}`
 
@@ -253,56 +218,49 @@ exportAndDownloadSTL(result.geometry, 'exported.stl');
 cleanup();
 ```
 
-### Example 1b: Rotated Projection Angle
+### Example 2: Rotated Projection Angle
 
 ```javascript
-import * as THREE from 'three';
 import { createOffsetMesh, extractVertices, cleanup } from './offsetMeshProcessor.js';
 
-// Load and rotate geometry to change projection angle
-const geometry = loadedGeometry.clone();
-
-// Rotate 45° around Y axis (XZ plane) and 30° around X axis (YZ plane, inverted)
-const rotationXZ = 45;
-const rotationYZ = 30;
-
-const rotMatrix = new THREE.Matrix4();
-rotMatrix.makeRotationY(rotationXZ * Math.PI / 180);
-
-const rotMatrixX = new THREE.Matrix4();
-const actualYZ = 180 - rotationYZ;  // Invert YZ for opposite projection
-rotMatrixX.makeRotationX(actualYZ * Math.PI / 180);
-rotMatrix.multiply(rotMatrixX);
-
-geometry.applyMatrix4(rotMatrix);
-geometry.computeVertexNormals();
-geometry.computeBoundingBox();
-
-// Create offset mesh from rotated geometry
+// Load geometry
 const vertices = extractVertices(geometry);
+
+// Create offset mesh with custom projection angle
 const result = await createOffsetMesh(vertices, {
     offsetDistance: 0.2,
-    pixelsPerUnit: 10
+    pixelsPerUnit: 10,
+    rotationXZ: 45,      // Rotate 45° around Y axis (XZ plane)
+    rotationYZ: 30       // Input 30°, actual rotation: 180° - 30° = 150° (YZ plane)
 });
 
-// Rotate back for display
-const inverseMatrix = new THREE.Matrix4();
-const invX = new THREE.Matrix4();
-invX.makeRotationX(-actualYZ * Math.PI / 180);
-inverseMatrix.multiply(invX);
+// The module handles rotation internally:
+// 1. Rotates vertices before heightmap generation
+// 2. Generates heightmap from rotated perspective
+// 3. Creates mesh
+// 4. Rotates back to original orientation
+// Result is in original orientation with offset generated from rotated angle
 
-const invY = new THREE.Matrix4();
-invY.makeRotationY(-rotationXZ * Math.PI / 180);
-inverseMatrix.multiply(invY);
-
-result.geometry.applyMatrix4(inverseMatrix);
-result.geometry.computeVertexNormals();
-
-// Add to scene
+// Add to scene or export
 const mesh = new THREE.Mesh(result.geometry, material);
 scene.add(mesh);
 
 cleanup();
+```
+
+### Example 3: Inverted Mesh (Bottom-Up Projection)
+
+```javascript
+// Create inverted mesh by setting both rotations to 0
+const result = await createOffsetMesh(vertices, {
+    offsetDistance: 0.2,
+    pixelsPerUnit: 10,
+    rotationXZ: 0,       // No XZ rotation
+    rotationYZ: 0        // Input 0°, actual rotation: 180° - 0° = 180° (flipped)
+});
+
+// This creates a mesh projected from the bottom looking up
+// Useful for generating support structures or inverted shells
 ```
 
 ### Example 2: Batch Processing
