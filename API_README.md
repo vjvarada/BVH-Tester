@@ -36,7 +36,7 @@ const vertices = extractVertices(geometry);
 
 // Create offset mesh (returns BufferGeometry)
 const result = await createOffsetMesh(vertices, {
-    offsetDistance: 0.2,        // Offset amount in world units
+    offsetDistance: 5.0,        // Offset amount in world units
     pixelsPerUnit: 10,          // Resolution (higher = more detail)
     simplifyRatio: 0.5,         // Optional: simplify to 50% of triangles
     verifyManifold: true        // Optional: verify and repair manifold issues
@@ -182,9 +182,9 @@ import { createOffsetMesh, cleanup } from './offsetMeshProcessor.js';
 
 // Create offset mesh
 const result = await createOffsetMesh(vertices, {
-    offsetDistance: 0.2,
+    offsetDistance: 5.0,
     pixelsPerUnit: 10,
-    simplifyRatio: 0.5
+    downsampleFactor: 2
 });
 
 // Add to scene
@@ -211,13 +211,12 @@ async function processBatch(files) {
         const geometry = await loadSTL(file);
         const vertices = extractVertices(geometry);
         
-        const result = await createOffsetMesh(vertices, {
-            offsetDistance: 0.2,
+        const result = await createAndExportOffsetMesh(vertices, {
+            offsetDistance: 5.0,
             pixelsPerUnit: 10,
-            simplifyRatio: 0.5
+            downsampleFactor: 2,
+            filename: `offset_${file.name}`
         });
-        
-        exportAndDownloadSTL(result.geometry, `offset_${file.name}`);
         
         results.push(result);
     }
@@ -231,7 +230,7 @@ async function processBatch(files) {
 
 ```javascript
 const result = await createOffsetMesh(vertices, {
-    offsetDistance: 0.2,
+    offsetDistance: 5.0,
     pixelsPerUnit: 10,
     progressCallback: (current, total, stage) => {
         const percent = Math.round(current);
@@ -249,13 +248,13 @@ const result = await createOffsetMesh(vertices, {
 ```javascript
 // Default: No simplification
 const fullMesh = await createOffsetMesh(vertices, {
-    offsetDistance: 0.2,
+    offsetDistance: 5.0,
     pixelsPerUnit: 10
 });
 
 // Simplify to 50% with manifold verification
 const simplifiedSafe = await createOffsetMesh(vertices, {
-    offsetDistance: 0.2,
+    offsetDistance: 5.0,
     pixelsPerUnit: 10,
     simplifyRatio: 0.5,
     verifyManifold: true  // Falls back to full mesh if simplification creates non-manifold issues
@@ -263,7 +262,7 @@ const simplifiedSafe = await createOffsetMesh(vertices, {
 
 // Simplify to 30% without verification (always use simplified, even if non-manifold)
 const simplifiedAggressive = await createOffsetMesh(vertices, {
-    offsetDistance: 0.2,
+    offsetDistance: 5.0,
     pixelsPerUnit: 10,
     simplifyRatio: 0.3,
     verifyManifold: false  // Use simplified mesh as-is
@@ -282,9 +281,9 @@ import { exportAndDownloadSTL } from './stlExporter.js';
 
 // Create offset mesh
 const result = await createOffsetMesh(vertices, {
-    offsetDistance: 0.2,
+    offsetDistance: 5.0,
     pixelsPerUnit: 10,
-    simplifyRatio: 0.5
+    downsampleFactor: 2
 });
 
 // Use BufferGeometry for CSG operations

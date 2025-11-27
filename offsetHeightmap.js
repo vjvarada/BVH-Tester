@@ -355,6 +355,149 @@ async function getTileDB() {
 }
 
 // ============================================
+// Morphological Operations
+// ============================================
+
+/**
+ * Apply morphological closing to fill interior holes only
+ * Uses flood-fill from edges to identify exterior empty regions vs interior holes
+ */
+function applyMorphologicalClosing(heightMap, resolution, iterations = 5, kernelSize = 3) {
+    const startTime = performance.now();
+    
+    const INVALID_VALUE = -0.99; // Empty pixels are at -1.0 (renderer clear value)
+    const halfKernel = Math.floor(kernelSize / 2);
+    
+    // Step 1: Mark exterior empty regions using flood-fill from edges
+    const isExterior = new Uint8Array(heightMap.length); // 0 = unknown, 1 = exterior, 2 = interior hole
+    const queue = [];
+    
+    // Start flood-fill from all edge empty pixels
+    for (let x = 0; x < resolution; x++) {
+        // Top edge
+        if (heightMap[x] <= INVALID_VALUE) {
+            queue.push(x);
+            isExterior[x] = 1;
+        }
+        // Bottom edge
+        const bottomIdx = (resolution - 1) * resolution + x;
+        if (heightMap[bottomIdx] <= INVALID_VALUE) {
+            queue.push(bottomIdx);
+            isExterior[bottomIdx] = 1;
+        }
+    }
+    for (let y = 1; y < resolution - 1; y++) {
+        // Left edge
+        const leftIdx = y * resolution;
+        if (heightMap[leftIdx] <= INVALID_VALUE) {
+            queue.push(leftIdx);
+            isExterior[leftIdx] = 1;
+        }
+        // Right edge
+        const rightIdx = y * resolution + (resolution - 1);
+        if (heightMap[rightIdx] <= INVALID_VALUE) {
+            queue.push(rightIdx);
+            isExterior[rightIdx] = 1;
+        }
+    }
+    
+    // Flood-fill to mark all connected exterior regions
+    while (queue.length > 0) {
+        const idx = queue.shift();
+        const x = idx % resolution;
+        const y = Math.floor(idx / resolution);
+        
+        // Check 4-connected neighbors
+        const neighbors = [
+            [x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]
+        ];
+        
+        for (const [nx, ny] of neighbors) {
+            if (nx >= 0 && nx < resolution && ny >= 0 && ny < resolution) {
+                const nIdx = ny * resolution + nx;
+                if (isExterior[nIdx] === 0 && heightMap[nIdx] <= INVALID_VALUE) {
+                    isExterior[nIdx] = 1;
+                    queue.push(nIdx);
+                }
+            }
+        }
+    }
+    
+    // Mark interior holes (empty pixels not marked as exterior)
+    for (let i = 0; i < heightMap.length; i++) {
+        if (heightMap[i] <= INVALID_VALUE && isExterior[i] === 0) {
+            isExterior[i] = 2; // Interior hole
+        }
+    }
+    
+    // Step 2: Fill only interior holes using dilation
+    let current = new Float32Array(heightMap);
+    let temp = new Float32Array(heightMap.length);
+    
+    for (let iter = 0; iter < iterations; iter++) {
+        let changeCount = 0;
+        
+        for (let y = 0; y < resolution; y++) {
+            for (let x = 0; x < resolution; x++) {
+                const idx = y * resolution + x;
+                
+                // Only process interior holes
+                if (isExterior[idx] === 2) {
+                    // Find max valid neighbor
+                    let maxVal = current[idx];
+                    let foundValid = false;
+                    
+                    for (let ky = -halfKernel; ky <= halfKernel; ky++) {
+                        for (let kx = -halfKernel; kx <= halfKernel; kx++) {
+                            if (kx === 0 && ky === 0) continue;
+                            
+                            const nx = x + kx;
+                            const ny = y + ky;
+                            
+                            if (nx >= 0 && nx < resolution && ny >= 0 && ny < resolution) {
+                                const nIdx = ny * resolution + nx;
+                                if (current[nIdx] > INVALID_VALUE) {
+                                    maxVal = Math.max(maxVal, current[nIdx]);
+                                    foundValid = true;
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (foundValid && maxVal > INVALID_VALUE) {
+                        temp[idx] = maxVal;
+                        isExterior[idx] = 0; // No longer a hole
+                        changeCount++;
+                    } else {
+                        temp[idx] = current[idx];
+                    }
+                } else {
+                    // Keep valid pixels and exterior empty pixels unchanged
+                    temp[idx] = current[idx];
+                }
+            }
+        }
+        
+        // Swap buffers
+        [current, temp] = [temp, current];
+        
+        // Early exit if no more changes
+        if (changeCount === 0) {
+            console.log(`Morphological closing converged after ${iter + 1} iterations`);
+            break;
+        }
+    }
+    
+    // Copy result back to original array
+    for (let i = 0; i < heightMap.length; i++) {
+        heightMap[i] = current[i];
+    }
+    
+    const endTime = performance.now();
+    console.log(`Morphological closing applied in ${(endTime - startTime).toFixed(1)} ms`);
+}
+
+// ============================================
 // Core Heightmap Generation Functions
 // ============================================
 
@@ -460,10 +603,14 @@ function createSinglePassHeightMap(vertices, offset, resolution) {
     const endTime = performance.now();
     console.log(`Offset heightmap: ${triCount} triangles → ${resolution}x${resolution} in ${(endTime - startTime).toFixed(1)} ms`);
     
+    // Apply morphological closing to fill enclosed holes
+    applyMorphologicalClosing(heightMap, resolution);
+    
     geometry.dispose();
     offsetMaterial.dispose();
 
-    return { scale, center, rawHeightMap, heightMap, resolution };
+    // Return both the scaling factor and the original bounding box size for visualization
+    return { scale, center, size, rawHeightMap, heightMap, resolution };
 }
 
 function renderHeightMapTile(vertices, offset, scale, center, tileWidth, tileHeight, xStart, xEnd, yStart, yEnd) {
@@ -702,6 +849,9 @@ export async function loadHeightMapFromTiles(result, progressCallback = null) {
     
     const endTime = performance.now();
     console.log(`Heightmap loaded from IndexedDB in ${(endTime - startTime).toFixed(1)} ms`);
+    
+    // Apply morphological closing to fill enclosed holes
+    applyMorphologicalClosing(heightMap, resolution);
     
     return heightMap;
 }
