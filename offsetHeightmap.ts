@@ -234,30 +234,32 @@ export function cleanupOffscreenResources() {
 // ============================================
 
 class HeightmapTileDB {
+    dbName: string;
+    db: IDBDatabase | null = null;
+    batchQueue: any[] = [];
+    batchTimeout: any = null;
+    batchSize: number = 10;
+    
     constructor(dbName = 'HeightmapTileDB') {
         this.dbName = dbName;
-        this.db = null;
-        this.batchQueue = [];
-        this.batchTimeout = null;
-        this.batchSize = 10;
     }
     
-    async init() {
+    async init(): Promise<void> {
         if (this.db) return;
         
-        return new Promise((resolve, reject) => {
+        return new Promise<void>((resolve, reject) => {
             const request = indexedDB.open(this.dbName, 1);
             
             request.onerror = () => reject(request.error);
             request.onsuccess = () => {
                 this.db = request.result;
                 this.db.onversionchange = () => {
-                    this.db.close();
+                    this.db!.close();
                 };
                 resolve();
             };
             
-            request.onupgradeneeded = (event) => {
+            request.onupgradeneeded = (event: any) => {
                 const db = event.target.result;
                 if (!db.objectStoreNames.contains('tiles')) {
                     const store = db.createObjectStore('tiles', { keyPath: 'id' });
@@ -267,7 +269,7 @@ class HeightmapTileDB {
         });
     }
     
-    async saveTile(sessionId, tileX, tileY, data) {
+    async saveTile(sessionId: string, tileX: number, tileY: number, data: Uint8Array): Promise<void> {
         return new Promise((resolve, reject) => {
             this.batchQueue.push({ sessionId, tileX, tileY, data, resolve, reject });
             
@@ -298,7 +300,7 @@ class HeightmapTileDB {
                 store.put({ id, sessionId, data });
             }
             
-            await new Promise((resolve, reject) => {
+            await new Promise<void>((resolve, reject) => {
                 transaction.oncomplete = () => resolve();
                 transaction.onerror = () => reject(transaction.error);
             });
@@ -309,10 +311,10 @@ class HeightmapTileDB {
         }
     }
     
-    async loadTile(sessionId, tileX, tileY) {
+    async loadTile(sessionId: string, tileX: number, tileY: number): Promise<Uint8Array | null> {
         const id = `${sessionId}_${tileX}_${tileY}`;
         return new Promise((resolve, reject) => {
-            const transaction = this.db.transaction(['tiles'], 'readonly');
+            const transaction = this.db!.transaction(['tiles'], 'readonly');
             const store = transaction.objectStore('tiles');
             const request = store.get(id);
             
@@ -323,15 +325,15 @@ class HeightmapTileDB {
         });
     }
     
-    async clearSession(sessionId) {
-        return new Promise((resolve, reject) => {
-            const transaction = this.db.transaction(['tiles'], 'readwrite');
+    async clearSession(sessionId: string): Promise<void> {
+        return new Promise<void>((resolve, reject) => {
+            const transaction = this.db!.transaction(['tiles'], 'readwrite');
             const store = transaction.objectStore('tiles');
             const index = store.index('sessionId');
             const request = index.openCursor(IDBKeyRange.only(sessionId));
             
             request.onerror = () => reject(request.error);
-            request.onsuccess = (event) => {
+            request.onsuccess = (event: any) => {
                 const cursor = event.target.result;
                 if (cursor) {
                     cursor.delete();
@@ -641,7 +643,7 @@ function createSinglePassHeightMap(vertices, offset, resolution) {
         glslVersion: THREE.GLSL3,
     });
 
-    offsetMaterial.extensions = { ...offsetMaterial.extensions, fragDepth: true };
+    (offsetMaterial.extensions as any).fragDepth = true;
 
     const object = new THREE.Mesh(geometry, offsetMaterial);
 
@@ -741,7 +743,7 @@ function renderHeightMapTile(vertices, offset, scale, center, tileWidth, tileHei
         glslVersion: THREE.GLSL3,
     });
     
-    offsetMaterial.extensions = { ...offsetMaterial.extensions, fragDepth: true };
+    (offsetMaterial.extensions as any).fragDepth = true;
     
     const object = new THREE.Mesh(geometry, offsetMaterial);
     

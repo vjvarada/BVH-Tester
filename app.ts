@@ -23,21 +23,21 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
 // ============================================
 
 class OffsetGeneratorApp {
+    scene!: THREE.Scene;
+    camera!: THREE.OrthographicCamera;
+    renderer!: THREE.WebGLRenderer;
+    controls!: OrbitControls;
+    stats!: Stats;
+    
+    originalMesh: THREE.Mesh | null = null;
+    offsetMesh: THREE.Mesh | null = null;
+    
+    loadedGeometry: THREE.BufferGeometry | null = null;
+    
+    // Cache DOM elements
+    domElements: any = {};
+    
     constructor() {
-        this.scene = null;
-        this.camera = null;
-        this.renderer = null;
-        this.controls = null;
-        this.stats = null;
-        
-        this.originalMesh = null;
-        this.offsetMesh = null;
-        
-        this.loadedGeometry = null;
-        
-        // Cache DOM elements
-        this.domElements = {};
-        
         this.init();
         this.cacheDOMElements();
         this.setupEventListeners();
@@ -346,7 +346,13 @@ class OffsetGeneratorApp {
             if (this.offsetMesh) {
                 this.scene.remove(this.offsetMesh);
                 if (this.offsetMesh.geometry) this.offsetMesh.geometry.dispose();
-                if (this.offsetMesh.material) this.offsetMesh.material.dispose();
+                if (this.offsetMesh.material) {
+                    if (Array.isArray(this.offsetMesh.material)) {
+                        this.offsetMesh.material.forEach(m => m.dispose());
+                    } else {
+                        this.offsetMesh.material.dispose();
+                    }
+                }
                 this.offsetMesh = null;
             }
             
@@ -436,14 +442,26 @@ class OffsetGeneratorApp {
         if (this.originalMesh) {
             this.scene.remove(this.originalMesh);
             if (this.originalMesh.geometry) this.originalMesh.geometry.dispose();
-            if (this.originalMesh.material) this.originalMesh.material.dispose();
+            if (this.originalMesh.material) {
+                if (Array.isArray(this.originalMesh.material)) {
+                    this.originalMesh.material.forEach(m => m.dispose());
+                } else {
+                    this.originalMesh.material.dispose();
+                }
+            }
             this.originalMesh = null;
         }
         
         if (this.offsetMesh) {
             this.scene.remove(this.offsetMesh);
             if (this.offsetMesh.geometry) this.offsetMesh.geometry.dispose();
-            if (this.offsetMesh.material) this.offsetMesh.material.dispose();
+            if (this.offsetMesh.material) {
+                if (Array.isArray(this.offsetMesh.material)) {
+                    this.offsetMesh.material.forEach(m => m.dispose());
+                } else {
+                    this.offsetMesh.material.dispose();
+                }
+            }
             this.offsetMesh = null;
         }
     }
@@ -473,7 +491,7 @@ class OffsetGeneratorApp {
         
         const { statusLog } = this.domElements;
         if (!statusLog) {
-            console.warn('Status log element not found in DOM');
+            // Element not found - DOM might not be ready yet
             return;
         }
         

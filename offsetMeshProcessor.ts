@@ -6,7 +6,8 @@
 import * as THREE from 'three';
 import { createOffsetHeightMap, loadHeightMapFromTiles, cleanupOffscreenResources } from './offsetHeightmap.js';
 import { createWatertightMeshFromHeightmap, calculateOptimalMeshSettings } from './meshGenerator.js';
-import { MeshoptSimplifier } from './node_modules/meshoptimizer/meshopt_simplifier.module.js';
+import { MeshoptSimplifier } from 'meshoptimizer';
+import type { OffsetMeshOptions, OffsetMeshResult, HeightmapResult } from './types';
 
 // ============================================
 // Main Processing Pipeline
@@ -26,7 +27,7 @@ import { MeshoptSimplifier } from './node_modules/meshoptimizer/meshopt_simplifi
  * @param {Function} [options.progressCallback] - Progress callback (current, total, stage)
  * @returns {Promise<Object>} Result with geometry and metadata
  */
-export async function createOffsetMesh(vertices, options) {
+export async function createOffsetMesh(vertices: Float32Array, options: any): Promise<OffsetMeshResult> {
     const {
         offsetDistance,
         pixelsPerUnit,
@@ -52,7 +53,7 @@ export async function createOffsetMesh(vertices, options) {
         throw new Error('Simplify ratio must be between 0 and 1 (exclusive)');
     }
     
-    const result = {
+    const result: OffsetMeshResult = {
         heightmapResult: null,
         geometry: null,
         metadata: {
@@ -64,7 +65,8 @@ export async function createOffsetMesh(vertices, options) {
             processingTime: 0,
             simplificationApplied: false,
             simplificationTime: 0,
-            originalTriangleCount: 0
+            originalTriangleCount: 0,
+            geometryCreationTime: 0
         }
     };
     
@@ -123,13 +125,13 @@ export async function createOffsetMesh(vertices, options) {
             heightmapProgressCallback
         );
         
-        result.heightmapResult = heightmapResult;
+        result.heightmapResult = heightmapResult as HeightmapResult;
         
         // Step 3: Load heightmap data
         if (progressCallback) progressCallback(50, 100, 'Loading heightmap data');
         
         let heightMap;
-        if (heightmapResult.usesIndexedDB) {
+        if ('usesIndexedDB' in heightmapResult && heightmapResult.usesIndexedDB) {
             const loadProgressCallback = (current, total) => {
                 const percent = 50 + (current / total) * 20;
                 if (progressCallback) progressCallback(percent, 100, `Loading tile ${current}/${total}`);

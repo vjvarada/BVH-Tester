@@ -192,9 +192,9 @@ export function repairNonManifoldMesh(geometry, maxIterations = 5) {
         // Helper: Calculate triangle area
         const getTriangleArea = (triIdx) => {
             const i = triIdx * 3;
-            const i0 = indices[i] * 3;
-            const i1 = indices[i + 1] * 3;
-            const i2 = indices[i + 2] * 3;
+            const i0 = Number(indices[i]) * 3;
+            const i1 = Number(indices[i + 1]) * 3;
+            const i2 = Number(indices[i + 2]) * 3;
             
             const v0x = positions[i0], v0y = positions[i0 + 1], v0z = positions[i0 + 2];
             const v1x = positions[i1], v1y = positions[i1 + 1], v1z = positions[i1 + 2];

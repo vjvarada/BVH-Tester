@@ -105,7 +105,7 @@ export function createWatertightMeshFromHeightmap(
     });
     
     // Step 3: Build triangles
-    let indices = [];
+    let indices: Uint32Array | any[] = [];
     let idxCount = 0;
     
     const surfaceTriangles = (workingResolution - 1) * (workingResolution - 1) * 4;

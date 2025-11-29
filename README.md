@@ -1,6 +1,6 @@
 # Offset Mesh Processor - Modular API
 
-A modular, reusable library for creating GPU-accelerated offset meshes from STL geometry.
+A modular, reusable TypeScript library for creating GPU-accelerated offset meshes from STL geometry.
 
 ## Features
 
@@ -13,10 +13,29 @@ A modular, reusable library for creating GPU-accelerated offset meshes from STL 
 - 📊 **Progress Tracking** - Built-in progress callbacks
 - 🎯 **Adaptive Resolution** - Automatic sizing based on model dimensions
 - 🔄 **Rotatable Projection** - Change heightmap projection angle via XZ and YZ rotation
+- 📘 **TypeScript Support** - Fully typed with TypeScript for better IDE support
+
+## Development Setup
+
+This project is written in TypeScript. To work with it:
+
+```bash
+# Install dependencies
+npm install
+
+# Build TypeScript to JavaScript
+npm run build
+
+# Watch mode for development
+npm run watch
+
+# Start development server
+npm run dev
+```
 
 ## Installation
 
-```javascript
+```typescript
 import { createOffsetMesh } from './offsetMeshProcessor.js';
 import { exportAndDownloadSTL } from './stlExporter.js';
 ```

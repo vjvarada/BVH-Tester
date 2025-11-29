@@ -2,6 +2,7 @@
 // Example: Using the Offset Mesh Processor API
 // ============================================
 
+import * as THREE from 'three';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { 
     createOffsetMesh, 
